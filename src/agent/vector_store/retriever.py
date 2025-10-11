@@ -67,5 +67,5 @@ class OpenSearchStore:
         return vector_store.store
 
 
-elastic_store = OpenSearchStore(force_reload=False)
+elastic_store = OpenSearchStore(force_reload=settings.FORCE_RELOAD)
 retriever = elastic_store._retriever

@@ -9,7 +9,7 @@ if settings.LLM_TYPE == "chatgpt":
     if not token:
         token = input("Введите токен OpenAI:")
     llm = ChatOpenAI(
-        model="gpt-4o",
+        model=settings.OPENAI_API_MODEL,
         temperature=0,
         max_retries=2,
         openai_api_base=settings.OPENAI_API_BASE,
@@ -26,5 +26,4 @@ elif settings.LLM_TYPE == "deepseek":
         timeout=None,
         max_retries=2,
         api_key=token,
-        # other params...
     )
