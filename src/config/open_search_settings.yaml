@@ -1,0 +1,6 @@
+hosts: ["localhost:9200"]
+login: "admin"
+password: "" 
+cert_pem_path: null 
+cert_key_path: null 
+cert_root_path: null

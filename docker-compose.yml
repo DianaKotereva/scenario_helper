@@ -1,0 +1,15 @@
+name: scenario_helper
+version: '3'
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    command: python -m streamlit run app_streamlit.py --server.address 0.0.0.0 --server.port 7860
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./logs/streamlit:/app/logs/streamlit
+      - .:/app
+    ports:
+      - "7860:7860"
