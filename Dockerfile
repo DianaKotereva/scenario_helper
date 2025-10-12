@@ -4,7 +4,6 @@ WORKDIR /app
 COPY README.md .
 COPY requirements.txt .
 COPY app.py .
-COPY main.py .
 COPY src/ src/
 COPY data/ data/
 
