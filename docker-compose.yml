@@ -4,7 +4,7 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile.frontend
+      dockerfile: Dockerfile
     command: python -m streamlit run main.py --server.address 0.0.0.0 --server.port 7860
     volumes:
       - ./data:/app/data
