@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    command: python -m streamlit run app_streamlit.py --server.address 0.0.0.0 --server.port 7860
+    command: python -m streamlit run main.py --server.address 0.0.0.0 --server.port 7860
     volumes:
       - ./data:/app/data
       - ./src:/app/src
