@@ -10,7 +10,5 @@ services:
       - ./data:/app/data
       - ./src:/app/src
       - ./logs/streamlit:/app/logs/streamlit
-    env_file:
-      - .env
     ports:
       - "7860:7860"
