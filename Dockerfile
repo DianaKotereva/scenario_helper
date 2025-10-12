@@ -4,7 +4,7 @@ WORKDIR /app
 COPY README.md .
 COPY requirements.txt .
 COPY app.py .
-COPY app_streamlit.py .
+COPY main.py .
 COPY src/ src/
 COPY data/ data/
 
