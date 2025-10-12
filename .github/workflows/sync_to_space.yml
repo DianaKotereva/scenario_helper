@@ -16,4 +16,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git push https://DianelAnariel:$HF_TOKEN@huggingface.co/spaces/DianelAnariel/scenario_helper main
+          git push --force https://DianelAnariel:$HF_TOKEN@huggingface.co/spaces/DianelAnariel/scenario_helper main
