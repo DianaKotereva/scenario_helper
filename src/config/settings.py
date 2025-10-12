@@ -36,7 +36,7 @@ LANGSMITH_PROJECt: str = os.getenv("LANGSMITH_PROJECt")
 MAX_N_ITERATIONS: int = int(os.getenv("MAX_N_ITERATIONS", 2))
 
 FORCE_RELOAD: bool = os.getenv("FORCE_RELOAD", "False") == "True"
-USE_FAISS: bool = os.getenv("USE_FAISS", "False") == "True"
+USE_FAISS: bool = os.getenv("USE_FAISS", "True") == "True"
 FAISS_PATH: str = os.getenv("FAISS_PATH")
 
 with open("src/config/open_search_settings.yaml", "r", encoding="utf-8") as f:

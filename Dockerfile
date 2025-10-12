@@ -11,6 +11,6 @@ COPY data/ data/
 # Установка только необходимых зависимостей для Streamlit
 RUN pip install --no-cache-dir -r requirements.txt
 
-EXPOSE 7860
+EXPOSE 8501
 
-CMD ["streamlit", "run", "main.py", "--server.port=7860", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
