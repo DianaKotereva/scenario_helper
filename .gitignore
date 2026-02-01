@@ -2,7 +2,7 @@
 **/.virtual_documents
 **/__pycache__
 **/anaconda_projects
-**/tools
+**/tools/notebooks
 **/plan
 **/logs
 .env

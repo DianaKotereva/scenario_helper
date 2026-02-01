@@ -20,6 +20,12 @@ ES_PICKLE_DOCUMENTS_PATH: str = os.getenv(
 
 GRAPH_PICKLE_PATH: str = os.getenv("GRAPH_PICKLE_PATH", "data/bookgraph.pkl")
 
+# Настройки для получения глав
+CHAPTERS_INDEX_NAME: str = os.getenv("CHAPTERS_INDEX_NAME", f"{ES_INDEX_NAME}chapters")
+INCLUDE_FULL_CHAPTERS: bool = os.getenv("INCLUDE_FULL_CHAPTERS", "True") == "True"
+MAX_CHAPTERS_IN_CONTEXT: int = int(os.getenv("MAX_CHAPTERS_IN_CONTEXT", "5"))
+MAX_CHAPTER_TOKENS: int = int(os.getenv("MAX_CHAPTER_TOKENS", "15000"))
+
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "https://api.proxyapi.ru/openai/v1")
 OPENAI_API_MODEL: str = os.getenv("OPENAI_API_MODEL", "gpt-4.1-nano")

@@ -19,6 +19,7 @@ from src.llm_core.llm_core import llm
 from src.llm_core.llm_prompt_base import LLMBase
 from src.utils.graph_search import BookGraph, book_graph
 from src.agent.prompts.output_models import RetrieveOutput
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,9 @@ question_answer_prompt = """Ты — эксперт-аналитик, форми
 Дать ответ ИСКЛЮЧИТЕЛЬНО на основе:
 1. Исходный вопрос пользователя: str //Исходный вопрос, который задал пользователь
 3. Собранный контекст: List[str] // Уже имеющийся у тебя контекст. Контекст состоит из:
-    - Цитаты из книги
+    - Цитаты из книги (небольшие фрагменты из векторного поиска)
     - Суммаризации глав
+    - Полные тексты глав (если доступны) - используются для более глубокого понимания контекста
     - Описание действий персонажей/объектов книги, поданные в формате **Действия персонажа** - описание действий персонажа
     - Описание взаимодействия между разными объектами книги, поданные в формате **Взаимодействие между ___ и ___** - описание взаимодействия между персонажами 
 
@@ -317,6 +319,41 @@ class RetrieveAgent(LLMBase):
             answer_input["quote_texts"] = quote_texts
             answer_input["sums_texts"] = sums_texts
             
+            # Извлекаем уникальные source_id из найденных чанков и суммаризаций
+            source_ids = set()
+            for doc in quote_result + sums_result:
+                if hasattr(doc, 'metadata'):
+                    source_id = doc.metadata.get("source_id")
+                    if isinstance(source_id, int):
+                        source_ids.add(source_id)
+            
+            # Получаем полные тексты глав (если включено)
+            chapters_texts = ""
+            if settings.INCLUDE_FULL_CHAPTERS and source_ids:
+                try:
+                    from src.agent.vector_store.chapter_retriever import ChapterRetriever
+                    
+                    chapter_retriever = ChapterRetriever()
+                    
+                    # Ограничиваем количество глав
+                    source_ids_list = sorted(list(source_ids))[:settings.MAX_CHAPTERS_IN_CONTEXT]
+                    chapters_dict = chapter_retriever.get_chapters_by_source_ids(
+                        source_ids_list,
+                        max_chapters=settings.MAX_CHAPTERS_IN_CONTEXT
+                    )
+                    
+                    # Форматируем тексты глав с учетом ограничений по токенам
+                    chapters_texts = self._format_chapters_text(
+                        chapters_dict,
+                        max_tokens_per_chapter=settings.MAX_CHAPTER_TOKENS
+                    )
+                    
+                except Exception as e:
+                    logger.warning(f"Не удалось загрузить главы: {e}", exc_info=True)
+                    chapters_texts = ""
+            
+            answer_input["chapters_texts"] = chapters_texts
+            
             # Формируем финальный ответ
             try:
                 answer_input_query = self.make_user_prompt(query, answer_input)
@@ -400,11 +437,57 @@ class RetrieveAgent(LLMBase):
                 answer_input["quote_texts"]
             ])
 
+        if answer_input.get("chapters_texts"):
+            message.extend([
+                "==== Полные тексты глав книги: ====",
+                answer_input["chapters_texts"]
+            ])
+
         user_prompt = "\n\n".join(message)
         messages = {"messages": [("user", user_prompt)]}
         
         logger.debug(f"Formatted prompt for answer generation (query length: {len(query)})")
         return messages
+
+    def _format_chapters_text(
+        self, 
+        chapters_dict: Dict[int, str],
+        max_tokens_per_chapter: Optional[int] = None
+    ) -> str:
+        """
+        Форматирует тексты глав для добавления в промпт.
+        
+        Args:
+            chapters_dict: Словарь {source_id: chapter_text}
+            max_tokens_per_chapter: Максимальное количество токенов на главу
+            
+        Returns:
+            Отформатированная строка с текстами глав
+        """
+        if not chapters_dict:
+            return ""
+        
+        # Импортируем функцию подсчета токенов
+        from tools.preprocess_book.load_to_vectorstore.chunk_splitter import calculate_tokens
+        
+        formatted_chapters = []
+        for source_id, chapter_text in sorted(chapters_dict.items()):
+            # Обрезаем главу по токенам если слишком длинная
+            text_to_add = chapter_text
+            if max_tokens_per_chapter:
+                chapter_tokens = calculate_tokens(chapter_text)
+                if chapter_tokens > max_tokens_per_chapter:
+                    # Обрезаем текст (приблизительно, сохраняя начало)
+                    # Используем простую обрезку по символам (4 символа на токен)
+                    max_chars = max_tokens_per_chapter * 4
+                    text_to_add = chapter_text[:max_chars] + "\n[... текст обрезан ...]"
+                    logger.debug(f"Глава {source_id} обрезана: {chapter_tokens} -> {max_tokens_per_chapter} токенов")
+            
+            formatted_chapters.append(
+                f"==== Глава {source_id} ====\n{text_to_add}"
+            )
+        
+        return "\n\n".join(formatted_chapters)
 
 
 # Создаем парсер с Pydantic моделью для валидации
