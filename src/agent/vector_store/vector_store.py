@@ -132,9 +132,6 @@ class VectorStore:
                 if not batch:
                     break
                 self.store.add_documents(batch, batch_size=self.batch_size)
-            # self.store.add_documents(
-            #     to_add, batch_size=self.batch_size, bulk_size=len(to_add)
-            # )
             logger.info(f"Added {len(to_add)} new documents")
 
     def _incremental_change(self, new_docs) -> None:

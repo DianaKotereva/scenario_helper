@@ -1,6 +1,19 @@
-from src.llm_core.llm_prompt_base import LLMBase
+"""
+Промпт и агент для формирования финального ответа.
+
+Модуль содержит промпт и класс AnswerAgent для генерации
+финального ответа на основе собранного контекста и размышлений.
+"""
+
+import logging
+from typing import Dict, Any, List
+
+from langchain_core.output_parsers.pydantic import PydanticOutputParser
 from src.llm_core.llm_core import llm
-from langchain_core.output_parsers import JsonOutputParser
+from src.llm_core.llm_prompt_base import LLMBase
+from src.agent.prompts.output_models import FinalAnswerOutput
+
+logger = logging.getLogger(__name__)
 
 final_answer_prompt = """Ты — эксперт-аналитик, формирующий ответ на вопрос пользователя по книге. 
 
@@ -43,23 +56,83 @@ final_answer_prompt = """Ты — эксперт-аналитик, формир�
 
 ###
 Ты должен вернуть ответ в следующем формате JSON:
-{{
-  "final_answer": str
-}}
+
+{
+  "final_answer": str // Финальный ответ (минимум 50 символов, минимум 2 предложения)
+}
+
+# ТРЕБОВАНИЯ К ВАЛИДАЦИИ:
+- final_answer: минимум 50 символов
+- Ответ должен содержать минимум 2 предложения
+- Ответ должен быть структурированным: тезис → доказательства → вывод
+- Если информации недостаточно, явно укажи это
+
+{{format_instructions}}
 
 Сформируй ответ:"""
 
 
 class AnswerAgent(LLMBase):
-    def make_user_prompt(self, user_question, thoughts, context):
+    """
+    Агент для формирования финального ответа на вопрос пользователя.
+    
+    Агрегирует собранный контекст и цепочку размышлений для формирования
+    структурированного и обоснованного ответа.
+    """
+    
+    def make_user_prompt(
+        self, 
+        user_question: str, 
+        thoughts: List[str], 
+        context: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Форматирует пользовательский промпт для генерации финального ответа.
+        
+        Args:
+            user_question: Исходный вопрос пользователя
+            thoughts: Цепочка размышлений агента
+            context: Собранный контекст (список словарей с вопросами и ответами)
+            
+        Returns:
+            Словарь с сообщениями для LLM в формате {"messages": [("user", prompt)]}
+            
+        Raises:
+            ValueError: Если входные данные некорректны
+        """
+        if not user_question or not isinstance(user_question, str):
+            raise ValueError("user_question must be a non-empty string")
+        
+        if not isinstance(thoughts, list):
+            thoughts = []
+        
+        if not isinstance(context, list):
+            context = []
+        
+        # Форматируем контекст для промпта
+        context_str = str(context) if context else "Контекст отсутствует"
+        thoughts_str = "\n".join(thoughts) if thoughts else "Размышления отсутствуют"
+        
         message = [
             f"**Исходный вопрос пользователя:** {user_question}",
-            f"**Цепочка размышлений:** {thoughts}",
-            f"**Собранный контекст:** {context}",
+            f"**Цепочка размышлений:** {thoughts_str}",
+            f"**Собранный контекст:** {context_str}",
         ]
         user_prompt = "\n\n".join(message)
         messages = {"messages": [("user", user_prompt)]}
+        
+        logger.debug(f"Formatted prompt for final answer (question length: {len(user_question)})")
         return messages
 
 
-answer_agent = AnswerAgent(llm, final_answer_prompt, JsonOutputParser())
+# Создаем парсер с Pydantic моделью для валидации
+answer_parser = PydanticOutputParser(pydantic_object=FinalAnswerOutput)
+
+# Обновляем промпт с инструкциями по форматированию
+final_answer_prompt_with_format = final_answer_prompt.replace(
+    "{{format_instructions}}",
+    answer_parser.get_format_instructions()
+)
+
+# Создаем экземпляр агента с валидацией
+answer_agent = AnswerAgent(llm, final_answer_prompt_with_format, answer_parser)

@@ -1,6 +1,19 @@
-from langchain_core.output_parsers import JsonOutputParser
+"""
+Промпт и агент для рассуждений и принятия решений.
+
+Модуль содержит промпт и класс ReasoningAgent для анализа
+собранного контекста и принятия решения о следующем шаге.
+"""
+
+import logging
+from typing import Dict, Any, List
+
+from langchain_core.output_parsers.pydantic import PydanticOutputParser
 from src.llm_core.llm_core import llm
 from src.llm_core.llm_prompt_base import LLMBase
+from src.agent.prompts.output_models import ReasoningOutput
+
+logger = logging.getLogger(__name__)
 
 reasoning_prompt = """Ты — аналитический агент-рассуждатель. Твоя задача — критически оценить собранную информацию и принять решение о дальнейших действиях.
 
@@ -25,23 +38,73 @@ reasoning_prompt = """Ты — аналитический агент-рассу�
 # Выходные данные: 
 Ты должен вернуть JSON со следующими полями: 
 
-{{"reasoning": str, // Твои детальные рассуждения
-  "next_step": str, // Если ты считаешь, что требуется собрать еще какую-то информацию, чтобы ответить на вопрос, верни SEARCH. Если ты считаешь, что информации достаточно для ответа, верни ANSWER.
-  "to_collect": str // Описание задания для сбора информации следующему агенту - какую именно информацию требуется собрать?
-}}
+{
+  "reasoning": str, // Твои детальные рассуждения (минимум 10 символов)
+  "next_step": "SEARCH" | "ANSWER", // Если требуется собрать еще информацию -> SEARCH, если достаточно -> ANSWER
+  "to_collect": str // Описание задания для сбора информации (минимум 5 символов, особенно важно при next_step=SEARCH)
+}
+
+# ТРЕБОВАНИЯ К ВАЛИДАЦИИ:
+- reasoning: минимум 10 символов, должен содержать осмысленный анализ
+- next_step: строго "SEARCH" или "ANSWER"
+- to_collect: минимум 5 символов, особенно важно при next_step=SEARCH
+
+{{format_instructions}}
 
 """
 
 
 class ReasoningAgent(LLMBase):
-    def make_user_prompt(self, user_question, context):
+    """
+    Агент для рассуждений и принятия решений.
+    
+    Анализирует собранный контекст и определяет, достаточно ли информации
+    для формирования ответа или требуется дополнительный поиск.
+    """
+    
+    def make_user_prompt(
+        self, 
+        user_question: str, 
+        context: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Форматирует пользовательский промпт для рассуждений.
+        
+        Args:
+            user_question: Исходный вопрос пользователя
+            context: Собранный контекст (список словарей с вопросами и ответами)
+            
+        Returns:
+            Словарь с сообщениями для LLM в формате {"messages": [("user", prompt)]}
+            
+        Raises:
+            ValueError: Если входные данные некорректны
+        """
+        if not user_question or not isinstance(user_question, str):
+            raise ValueError("user_question must be a non-empty string")
+        
+        if not isinstance(context, list):
+            context = []
+        
         message = [
             f"**Исходный вопрос пользователя:** {user_question}",
             f"**Собранный контекст:** {context}",
         ]
         user_prompt = "\n\n".join(message)
         messages = {"messages": [("user", user_prompt)]}
+        
+        logger.debug(f"Formatted prompt for reasoning (context items: {len(context)})")
         return messages
 
 
-reasoning_agent = ReasoningAgent(llm, reasoning_prompt, JsonOutputParser())
+# Создаем парсер с Pydantic моделью для валидации
+reasoning_parser = PydanticOutputParser(pydantic_object=ReasoningOutput)
+
+# Обновляем промпт с инструкциями по форматированию
+reasoning_prompt_with_format = reasoning_prompt.replace(
+    "{{format_instructions}}",
+    reasoning_parser.get_format_instructions()
+)
+
+# Создаем экземпляр агента с валидацией
+reasoning_agent = ReasoningAgent(llm, reasoning_prompt_with_format, reasoning_parser)

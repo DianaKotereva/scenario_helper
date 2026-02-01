@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union
 
 import json_repair
+from pydantic import BaseModel
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.messages.ai import AIMessage
 from langchain_core.output_parsers import BaseOutputParser
@@ -116,8 +117,22 @@ class LLMBase(ABC):
         string_re = string_re.replace("{'", '{"').replace("'}", '"}')
         return json_repair.loads(string_re)
 
-    def _process_output(self, output: Any) -> str:
-        """Uniform output processing"""
+    def _process_output(self, output: Any) -> Any:
+        """
+        Uniform output processing.
+        
+        Если используется PydanticOutputParser, результат уже будет Pydantic моделью.
+        Если используется JsonOutputParser, результат будет словарем.
+        Если парсера нет, возвращаем строку.
+        """
+        # Если используется PydanticOutputParser, результат уже валидирован
+        if isinstance(output, BaseModel):
+            return output
+        
+        # Если парсер уже обработал вывод, возвращаем как есть
+        if isinstance(output, dict):
+            return output
+        
         if hasattr(output, "content"):
             if self._parse_json:
                 try:
