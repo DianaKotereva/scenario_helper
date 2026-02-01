@@ -43,6 +43,10 @@ ES_INDEX_NAME = os.getenv("ES_INDEX_NAME", "shadow_and_flame_")
 CHAPTERS_INDEX_NAME = os.getenv("CHAPTERS_INDEX_NAME", f"{ES_INDEX_NAME}chapters")
 CHAPTERS_PICKLE_PATH = Path(os.getenv("CHAPTERS_PICKLE_PATH", str(DATA_DIR / "chapters.pkl")))
 
+# Настройки параллельности
+PARALLEL_CONCURRENCY = int(os.getenv("PARALLEL_CONCURRENCY", "5"))  # Количество одновременных запросов к LLM
+GRAPH_BUILD_CONCURRENCY = int(os.getenv("GRAPH_BUILD_CONCURRENCY", "10"))  # Количество параллельно обрабатываемых файлов графа
+
 # Создание директорий если они не существуют
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 GRAPH_NODES_DIR.mkdir(parents=True, exist_ok=True)

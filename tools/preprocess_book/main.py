@@ -18,6 +18,8 @@ from tools.preprocess_book.config.preprocess_settings import (
     SUMMARIES_DIR,
     VECTORSTORE_CHUNK_SIZE,
     VECTORSTORE_PICKLE_PATH,
+    PARALLEL_CONCURRENCY,
+    GRAPH_BUILD_CONCURRENCY,
 )
 from tools.preprocess_book.load_to_vectorstore import (
     ChapterIndexer,
@@ -156,7 +158,7 @@ def main():
                 summarization_prompt = SummarizationPrompt(llm=llm)
                 summarization_service = SummarizationService(summarization_prompt)
                 summaries = summarization_service.create_summaries(
-                    texts, summaries_output_dir
+                    texts, summaries_output_dir, concurrency=PARALLEL_CONCURRENCY
                 )
 
                 logger.info(f"Создано {len([s for s in summaries if s])} суммаризаций")
@@ -164,7 +166,9 @@ def main():
 
             # Этап 2: Экстракция данных из глав книги
             logger.info("Этап 2: Экстракция сущностей и отношений из глав книги...")
-            all_summarizations = extraction_service.extract_from_texts(texts)
+            all_summarizations = extraction_service.extract_from_texts(
+                texts, concurrency=PARALLEL_CONCURRENCY
+            )
             logger.info(f"Обработано {len(all_summarizations)} глав")
         else:
             logger.info(
@@ -173,7 +177,9 @@ def main():
 
         # Этап 3: Построение графа из результатов экстракции
         logger.info("Этап 3: Построение графа...")
-        all_book_nodes, relation_graphs = graph_builder.build_graph_from_results()
+        all_book_nodes, relation_graphs = graph_builder.build_graph_from_results(
+            concurrency=GRAPH_BUILD_CONCURRENCY
+        )
 
         logger.info(
             f"Построен граф с {len(all_book_nodes.nodes)} узлами и "
