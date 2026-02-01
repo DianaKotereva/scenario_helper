@@ -6,3 +6,5 @@
 **/plan
 **/logs
 .env
+**/tools/data
+
