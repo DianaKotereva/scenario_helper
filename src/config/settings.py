@@ -17,6 +17,14 @@ ES_BATCH_SIZE: int = int(os.getenv("ES_BATCH_SIZE", 100))
 ES_PICKLE_DOCUMENTS_PATH: str = os.getenv(
     "ES_PICKLE_DOCUMENTS_PATH", "data/all_langchain_chunks.pkl"
 )
+ES_TIMEOUT_RAW: str = os.getenv("ES_TIMEOUT", "").strip()
+ES_TIMEOUT: int | None = (
+    None
+    if ES_TIMEOUT_RAW.lower() in {"", "none", "null", "off", "false", "0"}
+    else int(ES_TIMEOUT_RAW)
+)
+ES_MAX_RETRIES: int = int(os.getenv("ES_MAX_RETRIES", 5))
+ES_RETRY_ON_TIMEOUT: bool = os.getenv("ES_RETRY_ON_TIMEOUT", "True") == "True"
 
 GRAPH_PICKLE_PATH: str = os.getenv("GRAPH_PICKLE_PATH", "data/bookgraph.pkl")
 

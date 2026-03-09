@@ -35,3 +35,13 @@ docker exec -e PYTHONPATH=/app scenario_helper-frontend-1 python tools/init_db.p
 ```powershell
 docker compose down
 ```
+
+## Debug Preprocess (до 5 глав)
+
+```powershell
+python -m tools.preprocess_book.main --book-path data/Ten-i-Plama.txt --debug
+```
+
+Полезные флаги:
+- `--debug` — включает быстрый режим и ограничивает обработку максимум 5 глав.
+- `--max-chapters N` — явный лимит глав; в debug режиме всё равно не больше 5.

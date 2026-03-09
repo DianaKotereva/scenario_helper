@@ -6,10 +6,12 @@
 """
 
 import logging
+import os
 import yaml
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from urllib.parse import urlparse
 
 from langchain_core.documents import Document
 
@@ -69,6 +71,15 @@ class ChapterIndexer:
                 "cert_key_path": settings.get("cert_key_path"),
                 "cert_root_path": settings.get("cert_root_path"),
             }
+
+            # Priority override from ES_URL for container/runtime compatibility.
+            # Example: ES_URL=http://opensearch-node:9200 -> hosts=["opensearch-node:9200"]
+            es_url = os.getenv("ES_URL", "").strip()
+            if es_url:
+                parsed = urlparse(es_url if "://" in es_url else f"http://{es_url}")
+                host = parsed.netloc or parsed.path
+                if host:
+                    self._opensearch_settings["hosts"] = [host]
             
             logger.debug(f"Loaded OpenSearch settings: hosts={self._opensearch_settings['hosts']}")
             return self._opensearch_settings

@@ -1,4 +1,6 @@
 import logging
+import hashlib
+import time
 from urllib.parse import urlparse
 from itertools import islice
 from pathlib import Path
@@ -46,6 +48,7 @@ class VectorStore:
         delete_old: bool = False,
         faiss_path: Optional[str] = "./faiss_index",  # Путь для сохранения FAISS
         setup_index: bool = True,
+        changed_source_ids: Optional[List[int]] = None,
     ):
         if not embedding_function:
             raise ValueError("Embedding function is required")
@@ -59,6 +62,7 @@ class VectorStore:
         self.delete_old = delete_old
         self.faiss_path = Path(faiss_path) if faiss_path else None
         self.setup_index = setup_index
+        self.changed_source_ids = changed_source_ids or []
         self.store = self._initialize_store()
         if self.setup_index:
             self._setup_index()
@@ -128,6 +132,13 @@ class VectorStore:
         parsed = urlparse(opensearch_url)
         opensearch_host = opensearch_url if parsed.netloc else f"http://{parsed.path}"
 
+        # Connection behavior for long-running scan/incremental operations.
+        # ES_TIMEOUT=None means "no explicit client timeout".
+        if getattr(settings, "ES_TIMEOUT", None) is not None:
+            kwargs["timeout"] = settings.ES_TIMEOUT
+        kwargs["max_retries"] = getattr(settings, "ES_MAX_RETRIES", 5)
+        kwargs["retry_on_timeout"] = getattr(settings, "ES_RETRY_ON_TIMEOUT", True)
+
         return OpenSearchVectorSearch(
             opensearch_url=opensearch_host,
             index_name=self.index_name,
@@ -148,107 +159,101 @@ class VectorStore:
                 self.store.add_documents(batch, batch_size=self.batch_size)
             logger.info(f"Added {len(to_add)} new documents")
 
-    def _incremental_change(self, new_docs) -> None:
-        """Handle incremental changes for OpenSearch."""
-        if not OPENSEARCH_AVAILABLE:
-            raise RuntimeError("OpenSearch not available")
+    @staticmethod
+    def _stable_doc_id(doc: Document) -> int:
+        meta = doc.metadata or {}
+        source = str(meta.get("source", "unknown"))
+        source_id = str(meta.get("source_id", "unknown"))
+        uid = str(meta.get("doc_uid", ""))
+        payload = f"{source}|{source_id}|{uid}|{doc.page_content}"
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:15]
+        return int(digest, 16)
 
-        client = self.store.client
-        existing_docs = {}
-        query = {"query": {"match_all": {}}, "_source": ["text", "metadata"]}
+    def _doc_identity(self, doc: Document) -> str:
+        meta = doc.metadata
+        if "source_id" not in meta:
+            raise ValueError("You should provide source_id")
+        if "id" not in meta:
+            meta["id"] = self._stable_doc_id(doc)
+        return f"{meta['source_id']}_{meta['id']}"
 
-        to_add = []
-        to_update = []
-        to_remove = []
-
-        for hit in helpers.scan(client, index=self.index_name, query=query):
+    def _embed_with_retry(self, texts: List[str], retries: int = 3, backoff: float = 1.5):
+        attempt = 0
+        while True:
             try:
-                meta = hit["_source"]["metadata"]
-                if "source_id" in meta:
-                    doc_id = str(meta["source_id"]) + "_" + str(meta["id"])
-                else:
-                    raise ValueError("You should provide source_id")
-                existing_docs[doc_id] = {
-                    "es_id": hit["_id"],
-                    "text": hit["_source"]["text"],
-                    "metadata": hit["_source"]["metadata"],
-                }
-            except KeyError:
-                to_remove.append(hit["_id"])
+                return self.store.embedding_function.embed_documents(texts)
+            except Exception:
+                attempt += 1
+                if attempt > retries:
+                    raise
+                sleep_s = backoff ** attempt
+                logger.warning(
+                    "Embedding batch failed (attempt %s/%s), retry in %.1fs",
+                    attempt,
+                    retries,
+                    sleep_s,
+                )
+                time.sleep(sleep_s)
 
-        new_docs_dict = {}
-        for doc in new_docs:
-            meta = doc.metadata
-            if "source_id" in meta:
-                doc_id = str(meta["source_id"]) + "_" + str(meta["id"])
-            else:
-                raise ValueError("You should provide source_id")
-            new_docs_dict[doc_id] = doc
-
-        # Поиск новых и измененных документов
-        for doc_id, new_doc in new_docs_dict.items():
-            if doc_id not in existing_docs:
-                to_add.append(new_doc)
-            else:
-                existing_doc = existing_docs[doc_id]
-                if (
-                    new_doc.page_content != existing_doc["text"]
-                    or new_doc.metadata != existing_doc["metadata"]
-                ):
-                    # Сохраняем es_id для обновления
-                    new_doc.metadata["_es_id"] = existing_doc["es_id"]
-                    to_update.append(new_doc)
-
-        # Поиск документов для удаления
-        if self.delete_old:
-            existing_ids = set(existing_docs.keys())
-            new_ids = set(new_docs_dict.keys())
-            for doc_id in existing_ids - new_ids:
-                to_remove.append(existing_docs[doc_id]["es_id"])
-
-        # Выполнение операций
-        logger.info(
-            f"Update stats: +{len(to_add)} to add, ±{len(to_update)} to update, -{len(to_remove)} to delete"
-        )
-
-        # Добавление новых документов
-        if to_add:
-            self.add_docs(to_add)
-
-        # Обновление измененных документов
-        if to_update:
-            bulk_actions = []
-            for doc in to_update:
-                es_id = doc.metadata.pop("_es_id")
-                doc_body = {"content": doc.page_content, "metadata": doc.metadata}
-
-                vector = self.store.embedding_function.embed_documents(
-                    [doc.page_content]
-                )[0]
-                doc_body["vector"] = vector
-
-                bulk_actions.append(
+    def _upsert_documents(self, docs: List[Document]) -> None:
+        if not docs:
+            return
+        client = self.store.client
+        batch_size = max(1, int(self.batch_size))
+        total = 0
+        started = time.time()
+        for i in range(0, len(docs), batch_size):
+            batch = docs[i : i + batch_size]
+            texts = [d.page_content for d in batch]
+            vectors = self._embed_with_retry(texts)
+            actions = []
+            for doc, vector in zip(batch, vectors):
+                actions.append(
                     {
                         "_op_type": "index",
                         "_index": self.index_name,
-                        "_id": es_id,
-                        "_source": doc_body,
+                        "_id": self._doc_identity(doc),
+                        "_source": {
+                            "text": doc.page_content,
+                            "metadata": doc.metadata,
+                            "vector_field": vector,
+                        },
                     }
                 )
+            helpers.bulk(client, actions)
+            total += len(actions)
+        logger.info(
+            "Upserted %s docs into '%s' in %.2fs",
+            total,
+            self.index_name,
+            time.time() - started,
+        )
 
-            helpers.bulk(client, bulk_actions)
-            logger.info(f"Updated {len(to_update)} documents")
+    def _delete_by_source_ids(self, source_ids: List[int]) -> None:
+        if not source_ids:
+            return
+        client = self.store.client
+        query = {"query": {"terms": {"metadata.source_id": source_ids}}}
+        client.delete_by_query(
+            index=self.index_name,
+            body=query,
+            conflicts="proceed",
+            refresh=True,
+        )
+        logger.info("Deleted existing docs by source_ids: %s", len(source_ids))
 
-        # Удаление лишних документов
-        if to_remove:
-            bulk_actions = [
-                {"_op_type": "delete", "_index": self.index_name, "_id": es_id}
-                for es_id in to_remove
-            ]
-            helpers.bulk(client, bulk_actions)
-            logger.info(f"Deleted {len(to_remove)} documents")
+    def _incremental_change(self, new_docs) -> None:
+        """Handle incremental changes for OpenSearch without full-index scan."""
+        if not OPENSEARCH_AVAILABLE:
+            raise RuntimeError("OpenSearch not available")
 
-        logger.info(f"Incremental update completed for index '{self.index_name}'")
+        if self.changed_source_ids:
+            self._delete_by_source_ids(self.changed_source_ids)
+        elif self.delete_old:
+            logger.warning("delete_old=True without changed_source_ids may keep stale docs")
+
+        self._upsert_documents(new_docs)
+        logger.info("Incremental update completed for index '%s'", self.index_name)
 
     def batch_documents_by_tokens(
         self, documents, max_tokens_per_batch, encoding_name="cl100k_base"
@@ -313,7 +318,7 @@ class VectorStore:
                     dimension=embed_dim, index_name=self.index_name
                 )
                 if documents:
-                    self.add_docs(documents)
+                    self._upsert_documents(documents)
 
     def _load_documents_from_pickle(self) -> List[Document]:
         """Load documents from a pickle file."""
@@ -342,14 +347,11 @@ class VectorStore:
                 for doc in documents
             ]
 
-        doc_counters: dict[str, int] = {}
         for i in documents:
-            if "source_id" in i.metadata:
-                graph_node = str(i.metadata["source_id"])
-            else:
+            if "source_id" not in i.metadata:
                 raise ValueError("You should provide source_id")
-            i.metadata["id"] = doc_counters.get(graph_node, 0)
-            doc_counters[graph_node] = i.metadata["id"] + 1
+            if "id" not in i.metadata:
+                i.metadata["id"] = self._stable_doc_id(i)
         return documents
 
     def similarity_search(self, query: str, k: int = 4, **kwargs):

@@ -7,6 +7,7 @@
 
 import logging
 import pickle
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,6 +19,16 @@ from src.config import settings
 from tools.preprocess_book.storage.storage import FileManager
 
 logger = logging.getLogger(__name__)
+
+
+def _stable_doc_id(doc: Document) -> int:
+    meta = doc.metadata or {}
+    source = str(meta.get("source", "unknown"))
+    source_id = str(meta.get("source_id", "unknown"))
+    uid = str(meta.get("doc_uid", ""))
+    payload = f"{source}|{source_id}|{uid}|{doc.page_content}"
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:15]
+    return int(digest, 16)
 
 
 class VectorStoreLoader:
@@ -72,18 +83,11 @@ class VectorStoreLoader:
             # Создаем директорию если она не существует
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Добавляем id к метаданным для каждого документа
-            # (требуется для VectorStore)
-            doc_counters: dict[str, int] = {}
+            # Stable id for deterministic incremental upsert.
             for doc in documents:
-                if "source_id" in doc.metadata:
-                    graph_node = str(doc.metadata["source_id"])
-                else:
+                if "source_id" not in doc.metadata:
                     logger.warning(f"Document without source_id: {doc.metadata}")
-                    graph_node = "unknown"
-
-                doc.metadata["id"] = doc_counters.get(graph_node, 0)
-                doc_counters[graph_node] = doc.metadata["id"] + 1
+                doc.metadata["id"] = _stable_doc_id(doc)
             
             # Сохраняем документы
             with open(output_path, "wb") as file:
@@ -102,6 +106,7 @@ class VectorStoreLoader:
         force_reload: bool = False,
         index_name: Optional[str] = None,
         batch_size: Optional[int] = None,
+        changed_source_ids: Optional[List[int]] = None,
     ) -> None:
         """
         Сохраняет документы и загружает их в векторное хранилище.
@@ -143,6 +148,7 @@ class VectorStoreLoader:
                 pickle_documents_path=str(output_pickle_path),
                 full_reload=force_reload,
                 faiss_path=faiss_path,
+                changed_source_ids=changed_source_ids,
             )
             
             logger.info("Документы успешно загружены в векторное хранилище")

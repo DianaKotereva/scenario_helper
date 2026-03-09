@@ -1,119 +1,138 @@
 """
-Модуль для преобразования BookGraph в Document объекты.
+Convert BookGraph into atomic LangChain documents.
 
-Содержит функции для конвертации узлов и отношений графа знаний
-в формат Document для загрузки в векторное хранилище.
+Each graph fact is represented as exactly one document:
+- one node action = one document
+- one relation description = one document
 """
 
 import logging
+import re
+import hashlib
 from typing import List
+
 from langchain_core.documents import Document
+
 from src.utils.graph_search import BookGraph
 
 logger = logging.getLogger(__name__)
 
 
+GRAPH_SCHEMA_VERSION = "graph_v1"
+
+
+def _to_int_source_id(source_id) -> int:
+    if isinstance(source_id, int):
+        return source_id
+    if isinstance(source_id, tuple) and source_id:
+        if isinstance(source_id[0], int):
+            return source_id[0]
+    raise ValueError(f"Unsupported source_id type: {source_id!r}")
+
+
+def _slug(text: str) -> str:
+    val = re.sub(r"\s+", "_", text.strip())
+    val = re.sub(r"[^0-9A-Za-z_\-]+", "", val)
+    return val[:80] or "unknown"
+
+
+def _node_doc_uid(entity_name: str, source_id: int, fact_index: int) -> str:
+    name_hash = hashlib.sha1(entity_name.encode("utf-8")).hexdigest()[:16]
+    return f"node::{name_hash}::{source_id}::{fact_index}"
+
+
+def _relation_doc_uid(
+    object_1: str, object_2: str, source_id: int, fact_index: int
+) -> str:
+    rel_key = f"{object_1}::{object_2}"
+    rel_hash = hashlib.sha1(rel_key.encode("utf-8")).hexdigest()[:16]
+    return f"rel::{rel_hash}::{source_id}::{fact_index}"
+
+
 def book_graph_to_documents(book_graph: BookGraph) -> List[Document]:
     """
-    Преобразует BookGraph в список Document объектов для векторного хранилища.
-    
-    Создает Document объекты из:
-    - Узлов графа (nodes) - с метаданными {"source": "nodes", "name": node_name}
-    - Отношений графа (relations) - с метаданными {"source": "relations", "name": (object_1, object_2)}
-    
-    Args:
-        book_graph: Граф знаний книги
-        
-    Returns:
-        Список Document объектов с узлами и отношениями
+    Convert BookGraph to atomic graph documents with strict metadata.
     """
-    documents = []
-    
-    try:
-        # Преобразуем узлы графа
-        for node_name, node in book_graph.nodes.nodes.items():
-            try:
-                # Объединяем все действия узла в один текст
-                actions_texts = []
-                for action in node.actions:
-                    if hasattr(action, 'action') and action.action:
-                        actions_texts.append(action.action)
-                        # Используем source_id из первого действия
-                        source_id = action.source_id if hasattr(action, 'source_id') else None
-                
-                if not actions_texts:
-                    # Если нет действий, пропускаем узел
-                    continue
-                
-                # Если source_id не найден, используем 0 как fallback
-                if source_id is None:
-                    source_id = (0,)
-                
-                page_content = " ".join(actions_texts)
-                
-                # Создаем Document для узла
-                node_doc = Document(
-                    page_content=page_content,
-                    metadata={
-                        "source_id": source_id,
-                        "source": "nodes",
-                        "name": node_name,
-                        "classification": node.classification,
-                    }
-                )
-                documents.append(node_doc)
-                
-            except Exception as e:
-                logger.error(f"Ошибка при преобразовании узла '{node_name}': {e}", exc_info=True)
+    documents: List[Document] = []
+
+    node_fact_count = 0
+    relation_fact_count = 0
+
+    for node_name, node in book_graph.nodes.nodes.items():
+        actions = getattr(node, "actions", []) or []
+        for fact_index, action in enumerate(actions):
+            action_text = getattr(action, "action", None)
+            if not action_text or not str(action_text).strip():
                 continue
-        
-        # Преобразуем отношения графа
-        for rel_key, relation in book_graph.relationships.relationships.items():
+
             try:
-                # Объединяем все описания отношения
-                descriptions_texts = []
-                source_ids = set()
-                
-                for desc in relation.description:
-                    if hasattr(desc, 'description') and desc.description:
-                        descriptions_texts.append(desc.description)
-                    if hasattr(desc, 'source_id'):
-                        source_ids.add(desc.source_id)
-                
-                if not descriptions_texts:
-                    # Если нет описаний, пропускаем отношение
-                    continue
-                
-                # Используем первый source_id или fallback
-                source_id = list(source_ids)[0] if source_ids else (0,)
-                
-                page_content = " ".join(descriptions_texts)
-                
-                # Создаем Document для отношения
-                rel_doc = Document(
-                    page_content=page_content,
-                    metadata={
-                        "source_id": source_id,
-                        "source": "relations",
-                        "name": (relation.object_1, relation.object_2),
-                    }
-                )
-                documents.append(rel_doc)
-                
-            except Exception as e:
-                logger.error(
-                    f"Ошибка при преобразовании отношения '{rel_key}': {e}",
-                    exc_info=True
+                source_id = _to_int_source_id(getattr(action, "source_id", None))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skip invalid node fact source_id for entity '%s': %s",
+                    node_name,
+                    exc,
                 )
                 continue
-        
-        logger.info(
-            f"Преобразовано {len([d for d in documents if d.metadata.get('source') == 'nodes'])} узлов "
-            f"и {len([d for d in documents if d.metadata.get('source') == 'relations'])} отношений"
-        )
-        
-    except Exception as e:
-        logger.error(f"Критическая ошибка при преобразовании графа: {e}", exc_info=True)
-        raise
-    
+
+            metadata = {
+                "schema_version": GRAPH_SCHEMA_VERSION,
+                "source": "nodes",
+                "source_id": source_id,
+                "graph_doc_type": "node_fact",
+                "entity_name": node_name,
+                "entity_classification": getattr(node, "classification", ""),
+                "fact_index": fact_index,
+                "doc_uid": _node_doc_uid(node_name, source_id, fact_index),
+                # Backward-compatible field used in retrieval/debug tooling.
+                "name": node_name,
+            }
+
+            documents.append(Document(page_content=str(action_text).strip(), metadata=metadata))
+            node_fact_count += 1
+
+    for relation in book_graph.relationships.relationships.values():
+        descriptions = getattr(relation, "description", []) or []
+        object_1 = getattr(relation, "object_1", "")
+        object_2 = getattr(relation, "object_2", "")
+
+        for fact_index, description in enumerate(descriptions):
+            text = getattr(description, "description", None)
+            if not text or not str(text).strip():
+                continue
+
+            try:
+                source_id = _to_int_source_id(getattr(description, "source_id", None))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Skip invalid relation fact source_id for '%s'->'%s': %s",
+                    object_1,
+                    object_2,
+                    exc,
+                )
+                continue
+
+            relation_type = getattr(description, "type", "") or ""
+            metadata = {
+                "schema_version": GRAPH_SCHEMA_VERSION,
+                "source": "relations",
+                "source_id": source_id,
+                "graph_doc_type": "relation_fact",
+                "relation_object_1": object_1,
+                "relation_object_2": object_2,
+                "relation_type": relation_type,
+                "fact_index": fact_index,
+                "doc_uid": _relation_doc_uid(object_1, object_2, source_id, fact_index),
+                # Backward-compatible field used in retrieval/debug tooling.
+                "name": (object_1, object_2),
+            }
+            documents.append(Document(page_content=str(text).strip(), metadata=metadata))
+            relation_fact_count += 1
+
+    logger.info(
+        "Converted graph to atomic docs: node_facts=%s, relation_facts=%s, total=%s",
+        node_fact_count,
+        relation_fact_count,
+        len(documents),
+    )
     return documents

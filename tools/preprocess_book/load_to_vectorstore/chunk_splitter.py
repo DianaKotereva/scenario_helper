@@ -82,9 +82,16 @@ def split_documents(
         Список Document объектов с разбитыми текстами
     """
     split_docs = []
+    unsplittable_sources = {"nodes", "relations"}
     
     for doc in documents:
         try:
+            source = doc.metadata.get("source")
+            if source in unsplittable_sources:
+                # Keep atomic graph facts unsplitted.
+                split_docs.append(doc)
+                continue
+
             # Подсчитываем токены в документе
             doc_tokens = calculate_tokens(doc.page_content, encoding_name)
             

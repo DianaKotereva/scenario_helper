@@ -7,6 +7,8 @@
 """
 
 import argparse
+import hashlib
+import json
 import logging
 import sys
 from pathlib import Path
@@ -25,6 +27,12 @@ from tools.preprocess_book.load_to_vectorstore import (
     ChapterIndexer,
     DocumentPreparer,
     VectorStoreLoader,
+)
+from tools.preprocess_book.load_to_vectorstore.quality_gates import (
+    expected_graph_fact_counts,
+    validate_chapters,
+    validate_graph_documents,
+    validate_non_chapter_documents,
 )
 from tools.preprocess_book.make_graph.extraction_service import ExtractionService
 from tools.preprocess_book.make_graph.graph_builder import GraphBuilder
@@ -51,6 +59,52 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+
+def _source_hash_map(documents):
+    by_source = {}
+    for doc in documents:
+        source_id = doc.metadata.get("source_id")
+        if not isinstance(source_id, int):
+            continue
+        uid = str(doc.metadata.get("doc_uid", ""))
+        row = f"{uid}|{doc.page_content}"
+        by_source.setdefault(source_id, []).append(row)
+
+    res = {}
+    for source_id, rows in by_source.items():
+        payload = "\n".join(sorted(rows))
+        res[source_id] = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    return res
+
+
+def _load_manifest(path: Path):
+    if not path.exists():
+        return {"source_hashes": {}}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"source_hashes": {}}
+
+
+def _save_manifest(path: Path, source_hashes):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"source_hashes": source_hashes}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _detect_changed_source_ids(current_hashes, previous_hashes):
+    current_keys = set(current_hashes.keys())
+    previous_keys = set(previous_hashes.keys())
+    changed = {
+        sid
+        for sid in current_keys
+        if previous_hashes.get(str(sid)) != current_hashes.get(sid)
+    }
+    removed = {int(sid) for sid in previous_keys - {str(i) for i in current_keys}}
+    return sorted(changed | removed)
 
 
 def main():
@@ -91,8 +145,16 @@ def main():
     )
     parser.add_argument(
         "--load-to-vectorstore",
+        dest="load_to_vectorstore",
         action="store_true",
-        help="Загрузить документы (книга, суммаризации, граф) в векторное хранилище",
+        default=True,
+        help="Load documents (book, summaries, graph) into vectorstore and chapters index (enabled by default)",
+    )
+    parser.add_argument(
+        "--skip-vectorstore",
+        dest="load_to_vectorstore",
+        action="store_false",
+        help="Skip loading documents into vectorstore and chapters index",
     )
     parser.add_argument(
         "--vectorstore-pickle-path",
@@ -105,6 +167,17 @@ def main():
         action="store_true",
         help="Принудительная перезагрузка индекса векторного хранилища",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Быстрый отладочный режим (не более 5 глав)",
+    )
+    parser.add_argument(
+        "--max-chapters",
+        type=int,
+        default=0,
+        help="Ограничить количество обрабатываемых глав (0 = все)",
+    )
 
     args = parser.parse_args()
 
@@ -113,6 +186,19 @@ def main():
         output_path = Path(args.output_path)
     else:
         output_path = OUTPUT_DIR / "bookgraph.pkl"
+
+    chapter_limit = None
+    if args.debug:
+        requested_limit = args.max_chapters if args.max_chapters > 0 else 5
+        chapter_limit = min(requested_limit, 5)
+        logger.info(
+            "Debug mode: processing only %s chapters (hard cap 5)", chapter_limit
+        )
+    elif args.max_chapters > 0:
+        chapter_limit = args.max_chapters
+        logger.info("Chapter limit enabled: %s", chapter_limit)
+
+    processed_source_ids = None
 
     try:
         # Инициализация LLM
@@ -143,7 +229,14 @@ def main():
             book_text = load_book(book_path)
             # split_book по умолчанию разбивает на главы (split_into_chunks=False)
             texts = split_book(book_text)
+            if chapter_limit:
+                texts = texts[:chapter_limit]
             logger.info(f"Книга разбита на {len(texts)} глав")
+            processed_source_ids = {
+                (int(text.metadata["source_id"]),)
+                for text in texts
+                if isinstance(text.metadata.get("source_id"), int)
+            }
 
             # Этап 1.5: Создание суммаризаций (если запрошено)
             if args.create_summaries:
@@ -178,7 +271,9 @@ def main():
         # Этап 3: Построение графа из результатов экстракции
         logger.info("Этап 3: Построение графа...")
         all_book_nodes, relation_graphs = graph_builder.build_graph_from_results(
-            concurrency=GRAPH_BUILD_CONCURRENCY
+            concurrency=GRAPH_BUILD_CONCURRENCY,
+            max_files=chapter_limit,
+            allowed_source_ids=processed_source_ids,
         )
 
         logger.info(
@@ -226,11 +321,40 @@ def main():
                     include_summaries=summaries_dir.exists(),
                     include_graph=True,
                 )
+                expected_node_facts, expected_relation_facts = expected_graph_fact_counts(
+                    book_graph
+                )
+                graph_docs = [
+                    doc
+                    for doc in all_documents
+                    if doc.metadata.get("source") in {"nodes", "relations"}
+                ]
+                graph_gate_stats = validate_graph_documents(
+                    graph_docs,
+                    expected_node_facts=expected_node_facts,
+                    expected_relation_facts=expected_relation_facts,
+                )
+                logger.info(
+                    "Graph quality gate passed: total=%s, nodes=%s, relations=%s",
+                    graph_gate_stats["total_docs"],
+                    graph_gate_stats["nodes_docs"],
+                    graph_gate_stats["relations_docs"],
+                )
 
                 # Отделяем главы от остальных документов
                 logger.info("Разделение глав и остальных документов...")
                 chapters = preparer.get_chapters(all_documents)
                 other_documents = [doc for doc in all_documents if doc not in chapters]
+                chapter_gate_stats = validate_chapters(chapters)
+                logger.info(
+                    "Chapters quality gate passed: chapters_count=%s",
+                    chapter_gate_stats["chapters_count"],
+                )
+                other_gate_stats = validate_non_chapter_documents(other_documents)
+                logger.info(
+                    "Non-chapter quality gate passed: %s",
+                    other_gate_stats,
+                )
                 logger.info(
                     f"Найдено {len(chapters)} глав и {len(other_documents)} других документов"
                 )
@@ -238,18 +362,52 @@ def main():
                 # Разбиваем на мелкие чанки только остальные документы (не главы)
                 logger.info("Разбиение документов (кроме глав) на мелкие чанки...")
                 split_docs = preparer.split_to_small_chunks(other_documents)
+                split_gate_stats = validate_non_chapter_documents(split_docs)
+                logger.info("Split documents quality gate passed: %s", split_gate_stats)
+
+                # Incremental rebuild by changed source_id hashes.
+                manifest_path = OUTPUT_DIR / "preprocess_manifest.json"
+                current_hashes = _source_hash_map(split_docs)
+                previous_hashes = _load_manifest(manifest_path).get("source_hashes", {})
+                changed_source_ids = _detect_changed_source_ids(
+                    current_hashes=current_hashes,
+                    previous_hashes=previous_hashes,
+                )
+                if args.vectorstore_force_reload:
+                    changed_source_ids = sorted(current_hashes.keys())
+
+                if changed_source_ids:
+                    split_docs = [
+                        d for d in split_docs if d.metadata.get("source_id") in changed_source_ids
+                    ]
+                    chapters = [
+                        c for c in chapters if c.metadata.get("source_id") in changed_source_ids
+                    ]
+                    logger.info(
+                        "Incremental mode: changed source_ids=%s, docs=%s, chapters=%s",
+                        len(changed_source_ids),
+                        len(split_docs),
+                        len(chapters),
+                    )
+                else:
+                    logger.info("Incremental mode: no changes detected, skip indexing")
+                    split_docs = []
+                    chapters = []
 
                 # Загружаем чанки в векторное хранилище
-                logger.info("Загрузка чанков в векторное хранилище...")
-                loader = VectorStoreLoader()
-                loader.load_documents(
-                    documents=split_docs,
-                    output_pickle_path=vectorstore_pickle_path,
-                    force_reload=args.vectorstore_force_reload,
-                )
-
-                logger.info("Чанки успешно загружены в векторное хранилище!")
-                logger.info(f"Pickle файл сохранен в: {vectorstore_pickle_path}")
+                if split_docs:
+                    logger.info("Загрузка чанков в векторное хранилище...")
+                    loader = VectorStoreLoader()
+                    loader.load_documents(
+                        documents=split_docs,
+                        output_pickle_path=vectorstore_pickle_path,
+                        force_reload=args.vectorstore_force_reload,
+                        changed_source_ids=changed_source_ids,
+                    )
+                    logger.info("Чанки успешно загружены в векторное хранилище!")
+                    logger.info(f"Pickle файл сохранен в: {vectorstore_pickle_path}")
+                else:
+                    logger.info("Чанки не изменились, загрузка в vectorstore пропущена")
 
                 # Сохраняем главы в отдельный обычный ES индекс (не векторный)
                 if chapters:
@@ -266,6 +424,9 @@ def main():
                     logger.warning(
                         "Главы не найдены, пропускаем сохранение в ES индекс"
                     )
+
+                _save_manifest(manifest_path, current_hashes)
+                logger.info("Incremental manifest saved: %s", manifest_path)
 
             except Exception as e:
                 logger.error(
