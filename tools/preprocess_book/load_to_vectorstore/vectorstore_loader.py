@@ -74,21 +74,16 @@ class VectorStoreLoader:
             
             # Добавляем id к метаданным для каждого документа
             # (требуется для VectorStore)
-            all_graph_nodes = set()
+            doc_counters: dict[str, int] = {}
             for doc in documents:
                 if "source_id" in doc.metadata:
                     graph_node = str(doc.metadata["source_id"])
                 else:
-                    logger.warning(f"Документ без source_id: {doc.metadata}")
+                    logger.warning(f"Document without source_id: {doc.metadata}")
                     graph_node = "unknown"
-                
-                if graph_node not in all_graph_nodes:
-                    n = 0
-                    all_graph_nodes.add(graph_node)
-                else:
-                    n += 1
-                
-                doc.metadata["id"] = n
+
+                doc.metadata["id"] = doc_counters.get(graph_node, 0)
+                doc_counters[graph_node] = doc.metadata["id"] + 1
             
             # Сохраняем документы
             with open(output_path, "wb") as file:

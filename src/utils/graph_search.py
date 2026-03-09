@@ -1,7 +1,10 @@
+import logging
 import pickle
 import src.config.settings as settings
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,6 +67,17 @@ class CustomUnpickler(pickle.Unpickler):
 
 
 # Загрузка графа с использованием CustomUnpickler
-with open(settings.GRAPH_PICKLE_PATH, "rb") as file:
-    unpickler = CustomUnpickler(file)
-    book_graph = unpickler.load()
+try:
+    with open(settings.GRAPH_PICKLE_PATH, "rb") as file:
+        unpickler = CustomUnpickler(file)
+        book_graph = unpickler.load()
+except Exception as e:
+    logger.warning(
+        "Failed to load graph pickle from %s, using empty graph. Error: %s",
+        settings.GRAPH_PICKLE_PATH,
+        e,
+    )
+    book_graph = BookGraph(
+        nodes=AllBookNodes(nodes={}, names_list={}),
+        relationships=AllBooksEdges(relationships={}),
+    )

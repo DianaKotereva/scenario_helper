@@ -10,6 +10,7 @@
 
 import logging
 from copy import deepcopy
+import re
 
 import src.config.settings as settings
 from src.agent.agent_graph.constants import AgentDefaults, NextStep
@@ -64,6 +65,24 @@ def _validate_state(state: AgentState) -> None:
     """
     if not state.get("user_question"):
         raise ValueError("user_question is required in state")
+
+    user_question = str(state["user_question"]).strip()
+    if not user_question:
+        raise ValueError("user_question is required in state")
+
+    # Fail fast for shell-encoding corruption like "??? ????? ????????"
+    if re.fullmatch(r"[\?\s]+", user_question):
+        raise ValueError(
+            "user_question looks encoding-corrupted. Pass question in UTF-8."
+        )
+
+    question_mark_ratio = user_question.count("?") / max(len(user_question), 1)
+    if question_mark_ratio > 0.35:
+        raise ValueError(
+            "user_question looks encoding-corrupted. Pass question in UTF-8."
+        )
+
+    state["user_question"] = user_question
 
     if "n_iteration" in state and state["n_iteration"] < 0:
         raise ValueError("n_iteration must be non-negative")
@@ -135,7 +154,10 @@ def reasoning_node(state: AgentState) -> AgentState:
                 # Используем валидированные значения из Pydantic модели
                 state["thoughts"].append(reasoning_output.reasoning)
                 state["to_collect"] = reasoning_output.to_collect
-                state["next_step"] = reasoning_output.next_step.value  # Enum -> str
+                next_step_value = reasoning_output.next_step
+                if hasattr(next_step_value, "value"):
+                    next_step_value = next_step_value.value
+                state["next_step"] = str(next_step_value)
 
                 logger.debug(
                     f"Reasoning result validated: next_step={reasoning_output.next_step}, "
@@ -253,6 +275,7 @@ def search_node(state: AgentState) -> AgentState:
                 # Если результат уже является Pydantic моделью
                 if isinstance(result, QuestionGeneratorOutput):
                     questions_output = result
+                    questions = questions_output.questions
                 elif isinstance(result, dict):
                     # Пытаемся создать модель из словаря (валидация)
                     try:

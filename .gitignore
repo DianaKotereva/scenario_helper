@@ -7,4 +7,9 @@
 **/logs
 .env
 **/tools/data
+opensearch_data/
+test_data/results/
+data/*.lfs_pointer_backup
+data/all_langchain_chunks_noprefix.pkl
+data/all_langchain_chunks_with_prefix_backup.pkl
 

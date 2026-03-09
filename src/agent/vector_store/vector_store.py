@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlparse
 from itertools import islice
 from pathlib import Path
 from typing import List, Optional
@@ -44,6 +45,7 @@ class VectorStore:
         full_reload: bool = False,
         delete_old: bool = False,
         faiss_path: Optional[str] = "./faiss_index",  # Путь для сохранения FAISS
+        setup_index: bool = True,
     ):
         if not embedding_function:
             raise ValueError("Embedding function is required")
@@ -56,8 +58,10 @@ class VectorStore:
         self.full_reload = full_reload
         self.delete_old = delete_old
         self.faiss_path = Path(faiss_path) if faiss_path else None
+        self.setup_index = setup_index
         self.store = self._initialize_store()
-        self._setup_index()
+        if self.setup_index:
+            self._setup_index()
 
     def _initialize_store(self):
         """Initialize the vector store client based on settings."""
@@ -99,23 +103,33 @@ class VectorStore:
 
     def _initialize_opensearch(self) -> OpenSearchVectorSearch:
         """Initialize the OpenSearch vector store client."""
+        cfg = settings.open_search_settings or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
         kwargs = {}
-        if settings.open_search_settings.login is not None:
+        if cfg.get("login") and cfg.get("password"):
             kwargs["http_auth"] = (
-                settings.open_search_settings.login,
-                settings.open_search_settings.password,
+                cfg.get("login"),
+                cfg.get("password"),
             )
-        if settings.open_search_settings.cert_pem_path is not None:
+        if cfg.get("cert_pem_path") is not None:
             kwargs["cert_verify"] = True
-            kwargs["client_cert"] = settings.open_search_settings.cert_pem_path
-            kwargs["client_key"] = settings.open_search_settings.cert_key_path
-            kwargs["ca_certs"] = settings.open_search_settings.cert_root_path
+            kwargs["client_cert"] = cfg.get("cert_pem_path")
+            kwargs["client_key"] = cfg.get("cert_key_path")
+            kwargs["ca_certs"] = cfg.get("cert_root_path")
         else:
             kwargs["cert_verify"] = False
             kwargs["use_ssl"] = False
 
+        opensearch_url = settings.ES_URL
+        if not opensearch_url.startswith(("http://", "https://")):
+            opensearch_url = f"http://{opensearch_url}"
+        parsed = urlparse(opensearch_url)
+        opensearch_host = opensearch_url if parsed.netloc else f"http://{parsed.path}"
+
         return OpenSearchVectorSearch(
-            opensearch_url=settings.open_search_settings.hosts[0],
+            opensearch_url=opensearch_host,
             index_name=self.index_name,
             embedding_function=self.embedding_function,
             engine="faiss",
@@ -294,13 +308,12 @@ class VectorStore:
             if index_exists:
                 self._incremental_change(documents)
             else:
+                embed_dim = len(self.embedding_function.embed_query("hello"))
+                self.store.create_index(
+                    dimension=embed_dim, index_name=self.index_name
+                )
                 if documents:
                     self.add_docs(documents)
-                else:
-                    embed_dim = len(self.embedding_function.embed_query("hello"))
-                    self.store.create_index(
-                        dimension=embed_dim, index_name=self.index_name
-                    )
 
     def _load_documents_from_pickle(self) -> List[Document]:
         """Load documents from a pickle file."""
@@ -310,8 +323,16 @@ class VectorStore:
             logger.warning(f"Pickle file {self.pickle_documents_path} not found")
             return []
 
-        with open(self.pickle_documents_path, "rb") as f:
-            documents = pickle.load(f)
+        try:
+            with open(self.pickle_documents_path, "rb") as f:
+                documents = pickle.load(f)
+        except Exception as e:
+            logger.warning(
+                "Failed to load pickle %s, using empty document list. Error: %s",
+                self.pickle_documents_path,
+                e,
+            )
+            return []
         if self._passage_prefix:
             documents = [
                 Document(
@@ -321,19 +342,14 @@ class VectorStore:
                 for doc in documents
             ]
 
-        all_graph_nodes = set()
-
+        doc_counters: dict[str, int] = {}
         for i in documents:
             if "source_id" in i.metadata:
                 graph_node = str(i.metadata["source_id"])
             else:
                 raise ValueError("You should provide source_id")
-            if graph_node not in all_graph_nodes:
-                n = 0
-            else:
-                n += 1
-            i.metadata["id"] = n
-            all_graph_nodes.add(graph_node)
+            i.metadata["id"] = doc_counters.get(graph_node, 0)
+            doc_counters[graph_node] = i.metadata["id"] + 1
         return documents
 
     def similarity_search(self, query: str, k: int = 4, **kwargs):

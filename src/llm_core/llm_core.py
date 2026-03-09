@@ -7,7 +7,10 @@ from src.config import settings as settings
 if settings.LLM_TYPE == "chatgpt":
     token = os.getenv("OPENAI_API_KEY")
     if not token:
-        token = input("Введите токен OpenAI:")
+        raise RuntimeError(
+            "OPENAI_API_KEY is required for LLM_TYPE=chatgpt. "
+            "Set it in environment variables."
+        )
     llm = ChatOpenAI(
         model=settings.OPENAI_API_MODEL,
         temperature=0,
@@ -18,7 +21,10 @@ if settings.LLM_TYPE == "chatgpt":
 elif settings.LLM_TYPE == "deepseek":
     token = os.getenv("DEEPSEEK_API_KEY")
     if not token:
-        token = input("Введите токен DeepSeek:")
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is required for LLM_TYPE=deepseek. "
+            "Set it in environment variables."
+        )
     llm = ChatDeepSeek(
         model="deepseek-chat",
         temperature=0,

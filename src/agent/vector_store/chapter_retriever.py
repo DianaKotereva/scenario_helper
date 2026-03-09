@@ -7,6 +7,7 @@
 
 import logging
 import yaml
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -20,6 +21,19 @@ except ImportError:
 from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _host_from_es_url(es_url: str) -> Optional[str]:
+    """Convert ES_URL into OpenSearch hosts entry (host:port)."""
+    if not es_url:
+        return None
+    normalized = es_url if es_url.startswith(("http://", "https://")) else f"http://{es_url}"
+    parsed = urlparse(normalized)
+    if parsed.netloc:
+        return parsed.netloc
+    if parsed.path:
+        return parsed.path
+    return None
 
 
 class ChapterRetriever:
@@ -53,9 +67,12 @@ class ChapterRetriever:
             settings_path = Path(__file__).parent.parent.parent / "config" / "open_search_settings.yaml"
             with open(settings_path, "r", encoding="utf-8") as f:
                 opensearch_config = yaml.safe_load(f)
+
+            es_host = _host_from_es_url(getattr(settings, "ES_URL", ""))
+            hosts = [es_host] if es_host else opensearch_config.get("hosts", ["localhost:9200"])
             
             self._opensearch_settings = {
-                "hosts": opensearch_config.get("hosts", ["localhost:9200"]),
+                "hosts": hosts,
                 "login": opensearch_config.get("login"),
                 "password": opensearch_config.get("password", ""),
                 "cert_pem_path": opensearch_config.get("cert_pem_path"),

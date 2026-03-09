@@ -88,36 +88,35 @@ class OpenSearchStore:
         pickle_documents_path = settings.ES_PICKLE_DOCUMENTS_PATH
         
         # Загружаем документы если не предоставлены
-        if not documents:
-            if pickle_documents_path and os.path.exists(pickle_documents_path):
-                try:
-                    with open(pickle_documents_path, "rb") as f:
-                        documents = pickle.load(f)
-                    logger.info(f"Loaded {len(documents)} documents from {pickle_documents_path}")
-                except Exception as e:
-                    logger.error(f"Error loading documents from {pickle_documents_path}: {e}", exc_info=True)
-                    raise FileNotFoundError(
-                        f"Failed to load documents from {pickle_documents_path}: {e}"
-                    )
-            else:
-                raise FileNotFoundError(
-                    f"Pickle file with documents not found at {pickle_documents_path}. "
-                    "Please check the path or provide documents directly."
+        if not documents and pickle_documents_path and os.path.exists(pickle_documents_path):
+            try:
+                with open(pickle_documents_path, "rb") as f:
+                    documents = pickle.load(f)
+                logger.info(f"Loaded {len(documents)} documents from {pickle_documents_path}")
+            except Exception as e:
+                logger.warning(
+                    "Could not load BM25 documents from %s, continue with vector-only retrieval. Error: %s",
+                    pickle_documents_path,
+                    e,
                 )
-        
-        if not documents:
-            raise ValueError("No documents provided for indexing")
+                documents = []
         
         # Настраиваем BM25 ретривер
-        try:
-            bm25_retriever = BM25Retriever.from_documents(
-                documents=documents,
-                k=settings.BM25_K,
-            )
-            logger.debug(f"BM25 retriever initialized with k={settings.BM25_K}")
-        except Exception as e:
-            logger.error(f"Error initializing BM25 retriever: {e}", exc_info=True)
-            raise
+
+        bm25_retriever = None
+        if documents:
+            try:
+                bm25_retriever = BM25Retriever.from_documents(
+                    documents=documents,
+                    k=settings.BM25_K,
+                )
+                logger.debug(f"BM25 retriever initialized with k={settings.BM25_K}")
+            except Exception as e:
+                logger.warning(
+                    "Error initializing BM25 retriever, continue with vector-only retrieval: %s",
+                    e,
+                    exc_info=True,
+                )
         
         # Настраиваем векторный ретривер
         try:
@@ -137,10 +136,15 @@ class OpenSearchStore:
             raise
         
         # Создаем ансамблевый ретривер
+
+        if bm25_retriever is None:
+            logger.info("Vector-only retriever initialized (BM25 disabled)")
+            return es_retriever
+
         try:
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[es_retriever, bm25_retriever],
-                weights=[0.8, 0.2],  # 80% векторный поиск, 20% BM25
+                weights=[0.8, 0.2],  # 80% vector, 20% BM25
             )
             logger.info("Ensemble retriever initialized successfully")
             return ensemble_retriever
@@ -163,6 +167,7 @@ class OpenSearchStore:
                 pickle_documents_path=settings.ES_PICKLE_DOCUMENTS_PATH,
                 full_reload=self.force_reload,
                 faiss_path=settings.FAISS_PATH,
+                setup_index=self.force_reload,
             )
             logger.debug("Vector store initialized successfully")
             return vector_store.store

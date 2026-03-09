@@ -119,7 +119,7 @@ class QuestionGeneratorOutput(BaseModel):
         # Если все вопросы были отфильтрованы, возвращаем пустой список
         return validated_questions
     
-    @root_validator
+    @root_validator(skip_on_failure=True)
     def validate_questions_reasoning_consistency(cls, values):
         """Проверяет согласованность между reasoning и questions."""
         reasoning = values.get('reasoning', '')

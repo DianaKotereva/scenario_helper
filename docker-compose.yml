@@ -1,11 +1,39 @@
 name: scenario_helper
-version: '3'
 services:
+  opensearch-node:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: opensearch-node
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "DISABLE_SECURITY_PLUGIN=true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   frontend:
     build:
       context: .
       dockerfile: Dockerfile
-    command: python -m streamlit run main.py --server.address 0.0.0.0 --server.port 8501
+    command: python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8501
+    depends_on:
+      opensearch-node:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://opensearch-node:9200
+      - OPENSEARCH_HOSTS=["opensearch-node:9200"]
     volumes:
       - ./data:/app/data
       - ./src:/app/src

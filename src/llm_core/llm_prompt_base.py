@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Union
 import json_repair
 from pydantic import BaseModel
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import SystemMessage
 from langchain_core.messages.ai import AIMessage
 from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -50,7 +51,7 @@ class LLMBase(ABC):
             self._load_template = False
 
         return ChatPromptTemplate.from_messages(
-            [("system", self._system_prompt), ("placeholder", "{messages}")]
+            [SystemMessage(content=self._system_prompt), ("placeholder", "{messages}")]
         )
 
     def make_llm_chain(self) -> Runnable:
