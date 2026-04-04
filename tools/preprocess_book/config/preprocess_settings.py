@@ -26,6 +26,7 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(DATA_DIR)))
 # Настройки LLM
 LLM_TYPE = os.getenv("LLM_TYPE", "deepseek")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.proxyapi.ru/openai/v1")
 OPENAI_API_MODEL = os.getenv("OPENAI_API_MODEL", "gpt-4.1-nano")
@@ -38,6 +39,10 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", 200))
 # Настройки обработки
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 1))
 VERIFICATION_LAST_N = int(os.getenv("VERIFICATION_LAST_N", -10))
+EXTRACTION_CHAPTER_BATCH_SIZE = int(os.getenv("EXTRACTION_CHAPTER_BATCH_SIZE", "5"))
+EXTRACTION_VALIDATION_RETRY_COUNT = int(
+    os.getenv("EXTRACTION_VALIDATION_RETRY_COUNT", "3")
+)
 
 # Настройки для vectorstore
 VECTORSTORE_CHUNK_SIZE = int(os.getenv("VECTORSTORE_CHUNK_SIZE", 512))
