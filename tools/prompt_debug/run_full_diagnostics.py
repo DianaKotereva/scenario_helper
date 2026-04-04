@@ -170,6 +170,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Comma-separated Excel row ids to run (example: 2,17,19).",
     )
+    parser.add_argument(
+        "--save-trace",
+        action="store_true",
+        help="Compatibility flag: traces are always saved into events.jsonl/cases/*.json.",
+    )
     return parser.parse_args()
 
 

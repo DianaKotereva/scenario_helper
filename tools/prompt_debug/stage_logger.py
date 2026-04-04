@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -41,6 +41,34 @@ class StageLogger:
         self._events_by_case[case_id].append(event)
         with self.events_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def log_phase(
+        self,
+        case_id: str,
+        phase: str,
+        query: str,
+        input_hints: Optional[Dict[str, Any]] = None,
+        selected_items: Optional[List[Dict[str, Any]]] = None,
+        rejected_items: Optional[List[Dict[str, Any]]] = None,
+        reason: str = "",
+        latency_ms: Optional[float] = None,
+        evidence_refs: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """
+        Стандартизованный trace-контракт для фаз retrieval:
+        phase, query, input_hints, selected_items, rejected_items, reason, latency_ms.
+        """
+        payload = {
+            "phase": phase,
+            "query": query,
+            "input_hints": input_hints or {},
+            "selected_items": selected_items or [],
+            "rejected_items": rejected_items or [],
+            "reason": reason,
+            "latency_ms": latency_ms,
+            "evidence_refs": evidence_refs or [],
+        }
+        self.log(case_id=case_id, stage=phase, payload=payload)
 
     @property
     def events_by_case(self) -> Dict[str, List[Dict[str, Any]]]:

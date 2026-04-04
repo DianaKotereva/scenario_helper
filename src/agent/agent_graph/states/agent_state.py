@@ -11,3 +11,4 @@ class AgentState(TypedDict):
     max_n_iterations: int
     n_iteration: int
     stop: bool
+    retrieval_trace: List[Dict[str, Any]]

@@ -140,6 +140,103 @@ def _build_chunks(chapters: Sequence[ChapterRecord], chunk_size: int, chunk_over
     return rows
 
 
+def _normalize_actions_from_raw(raw_actions: Any, default_source_id: int) -> List[str]:
+    if isinstance(raw_actions, list):
+        normalized: List[str] = []
+        for item in raw_actions:
+            if isinstance(item, str):
+                text = _normalize_whitespace(item)
+                if text:
+                    normalized.append(text)
+                continue
+            if isinstance(item, dict):
+                sid = item.get("source_id", default_source_id)
+                cid = item.get("chapter_id", sid)
+                desc = _normalize_whitespace(str(item.get("description", "")))
+                quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
+                quotes_clean = [_normalize_whitespace(str(q)) for q in quotes if _normalize_whitespace(str(q))]
+                if not desc:
+                    continue
+                if quotes_clean:
+                    normalized.append(
+                        f"[source_id={sid} chapter_id={cid}] {desc} | quotes: {' | '.join(quotes_clean)}"
+                    )
+                else:
+                    normalized.append(f"[source_id={sid} chapter_id={cid}] {desc}")
+        return normalized
+
+    text = _normalize_whitespace(str(raw_actions))
+    return [text] if text else []
+
+
+def _normalize_relation_rows_from_raw(rel: Dict[str, Any], default_source_id: int) -> List[Dict[str, Any]]:
+    source = str(rel.get("source_node_id", "")).strip()
+    target = str(rel.get("target_node_id", "")).strip()
+    if not source or not target:
+        return []
+
+    relation_type = str(rel.get("type", "")).strip()
+    descriptions = rel.get("descriptions")
+    if descriptions is None and rel.get("description") is not None:
+        descriptions = rel.get("description")
+
+    rows: List[Dict[str, Any]] = []
+    if isinstance(descriptions, str):
+        description = _normalize_whitespace(descriptions)
+        rows.append(
+            {
+                "source": source,
+                "target": target,
+                "type": relation_type,
+                "description": description,
+                "chapter_id": default_source_id,
+                "source_id": default_source_id,
+            }
+        )
+        return rows
+
+    if isinstance(descriptions, list):
+        for item in descriptions:
+            if isinstance(item, str):
+                text = _normalize_whitespace(item)
+                if text:
+                    rows.append(
+                        {
+                            "source": source,
+                            "target": target,
+                            "type": relation_type,
+                            "description": text,
+                            "chapter_id": default_source_id,
+                            "source_id": default_source_id,
+                        }
+                    )
+                continue
+            if not isinstance(item, dict):
+                continue
+            sid = item.get("source_id", default_source_id)
+            cid = item.get("chapter_id", sid)
+            desc = _normalize_whitespace(str(item.get("description", "")))
+            quotes = item.get("quotes") if isinstance(item.get("quotes"), list) else []
+            quotes_clean = [_normalize_whitespace(str(q)) for q in quotes if _normalize_whitespace(str(q))]
+            if not desc:
+                continue
+            if quotes_clean:
+                desc = f"{desc} | quotes: {' | '.join(quotes_clean)}"
+            rows.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "type": relation_type,
+                    "description": desc,
+                    "chapter_id": int(cid) if isinstance(cid, int) else default_source_id,
+                    "source_id": int(sid) if isinstance(sid, int) else default_source_id,
+                }
+            )
+        return rows
+
+    return rows
+
+
 def _extract_raw_from_results(results_dir: Path, max_files: int) -> Tuple[List[EntityRecord], List[RelationRecord], List[int]]:
     entities: List[EntityRecord] = []
     relations: List[RelationRecord] = []
@@ -152,11 +249,7 @@ def _extract_raw_from_results(results_dir: Path, max_files: int) -> Tuple[List[E
             if not main_name:
                 continue
             alt_names = [str(v).strip() for v in node.get("alt_names", []) if str(v).strip()]
-            raw_actions = node.get("actions")
-            if isinstance(raw_actions, list):
-                actions = [_normalize_whitespace(str(v)) for v in raw_actions if str(v).strip()]
-            else:
-                actions = [_normalize_whitespace(str(raw_actions))] if str(raw_actions).strip() else []
+            actions = _normalize_actions_from_raw(node.get("actions"), chapter_id)
             payload = {"chapter_id": chapter_id, "main_name": main_name, "classification": node.get("classification", "")}
             entity_id = _stable_id("raw_ent", payload)
             entities.append(
@@ -174,32 +267,27 @@ def _extract_raw_from_results(results_dir: Path, max_files: int) -> Tuple[List[E
             )
 
         for rel in data.get("relations", []):
-            source = str(rel.get("source_node_id", "")).strip()
-            target = str(rel.get("target_node_id", "")).strip()
-            if not source or not target:
-                continue
-            relation_type = str(rel.get("type", "")).strip()
-            description = _normalize_whitespace(str(rel.get("description", "")))
-            payload = {
-                "chapter_id": chapter_id,
-                "source": source,
-                "target": target,
-                "type": relation_type,
-                "description": description,
-            }
-            relations.append(
-                RelationRecord(
-                    relation_id=_stable_id("raw_rel", payload),
-                    source_entity=source,
-                    target_entity=target,
-                    type=relation_type,
-                    description=description,
-                    chapter_id=chapter_id,
-                    source_id=chapter_id,
-                    record_type="raw",
-                    metadata={"origin": "results"},
+            for rel_row in _normalize_relation_rows_from_raw(rel, chapter_id):
+                payload = {
+                    "chapter_id": rel_row["chapter_id"],
+                    "source": rel_row["source"],
+                    "target": rel_row["target"],
+                    "type": rel_row["type"],
+                    "description": rel_row["description"],
+                }
+                relations.append(
+                    RelationRecord(
+                        relation_id=_stable_id("raw_rel", payload),
+                        source_entity=rel_row["source"],
+                        target_entity=rel_row["target"],
+                        type=rel_row["type"],
+                        description=rel_row["description"],
+                        chapter_id=rel_row["chapter_id"],
+                        source_id=rel_row["source_id"],
+                        record_type="raw",
+                        metadata={"origin": "results"},
+                    )
                 )
-            )
     return entities, relations, chapter_ids
 
 

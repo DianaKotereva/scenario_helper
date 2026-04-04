@@ -34,6 +34,7 @@ default_values = [
     ("questions", AgentDefaults.QUESTIONS),
     ("final_answer", AgentDefaults.FINAL_ANSWER),
     ("stop", AgentDefaults.STOP),
+    ("retrieval_trace", []),
 ]
 
 
@@ -311,6 +312,15 @@ def search_node(state: AgentState) -> AgentState:
 
                 try:
                     result = retrieve_agent.invoke(query=query)
+                    trace_payload = []
+                    if isinstance(result, dict):
+                        raw_trace = result.get("trace", [])
+                        if isinstance(raw_trace, list):
+                            trace_payload = raw_trace
+                    if trace_payload:
+                        state.setdefault("retrieval_trace", []).append(
+                            {"query": query, "phases": trace_payload}
+                        )
 
                     # Обработка результата с Pydantic валидацией
                     from src.agent.prompts.output_models import RetrieveOutput

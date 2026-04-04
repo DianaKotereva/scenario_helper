@@ -224,3 +224,46 @@ class ChapterRetriever:
         except Exception as e:
             logger.warning(f"Ошибка при получении глав: {e}", exc_info=True)
             return {}
+
+    def get_chapters_by_chapter_ids(
+        self,
+        chapter_ids: List[int],
+        max_chapters: Optional[int] = None,
+    ) -> Dict[int, str]:
+        """Семантический алиас: chapter_id в нашем корпусе эквивалентен source_id."""
+        return self.get_chapters_by_source_ids(source_ids=chapter_ids, max_chapters=max_chapters)
+
+    def get_guided_chapters(
+        self,
+        hint_chapter_ids: Optional[List[int]] = None,
+        hint_source_ids: Optional[List[int]] = None,
+        max_chapters: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Guided retrieval по chapter/source hints.
+
+        Returns:
+            {
+              "chapters": Dict[int, str],
+              "selected_items": List[int],
+              "rejected_items": List[int]
+            }
+        """
+        chapter_ids = set(hint_chapter_ids or [])
+        source_ids = set(hint_source_ids or [])
+        all_ids = sorted(chapter_ids.union(source_ids))
+
+        if not all_ids:
+            return {"chapters": {}, "selected_items": [], "rejected_items": []}
+
+        chapters = self.get_chapters_by_source_ids(
+            source_ids=all_ids,
+            max_chapters=max_chapters,
+        )
+        selected = sorted(chapters.keys())
+        rejected = sorted(set(all_ids) - set(selected))
+        return {
+            "chapters": chapters,
+            "selected_items": selected,
+            "rejected_items": rejected,
+        }

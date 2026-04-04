@@ -6,6 +6,7 @@
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional, Set, Tuple, List
 
 from langchain_core.documents import Document
@@ -14,10 +15,13 @@ from langchain_core.output_parsers import BaseOutputParser
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
-from src.agent.vector_store.retriever import retriever
+from src.agent.vector_store.retriever import retriever, high_recall_search
+from src.agent.vector_store.chapter_retriever import ChapterRetriever
 from src.llm_core.llm_core import llm
 from src.llm_core.llm_prompt_base import LLMBase
 from src.utils.graph_search import BookGraph, book_graph
+from src.utils.graph_search import search_entity_chapter_index, traverse_relations_for_entities
+from src.utils.chapter_search import guided_deterministic_search
 from src.agent.prompts.output_models import RetrieveOutput
 from src.config import settings
 
@@ -253,6 +257,69 @@ class RetrieveAgent(LLMBase):
             logger.error(f"Error processing graph results: {e}", exc_info=True)
             return {"nodes_texts": "", "rel_texts": ""}
 
+    def _classify_search_docs(self, search_result: List[Document]) -> Dict[str, List[Document]]:
+        return {
+            "quote_result": [
+                doc for doc in search_result
+                if hasattr(doc, "metadata") and doc.metadata.get("source") == "book"
+            ],
+            "nodes_result": [
+                doc for doc in search_result
+                if hasattr(doc, "metadata") and doc.metadata.get("source") == "nodes"
+            ],
+            "rels_result": [
+                doc for doc in search_result
+                if hasattr(doc, "metadata") and doc.metadata.get("source") == "relations"
+            ],
+            "sums_result": [
+                doc for doc in search_result
+                if hasattr(doc, "metadata") and doc.metadata.get("source") == "summary"
+            ],
+        }
+
+    def _format_phase_b_context(self, phase_b: Dict[str, Any]) -> Dict[str, str]:
+        entities_text = "\n***\n".join(
+            [
+                f"{row.get('main_name', '')}: {row.get('summary', '')}"
+                for row in (phase_b.get("entities") or [])
+            ]
+        )
+        relations_text = "\n***\n".join(
+            [
+                (
+                    f"{row.get('source_entity', '')} -[{row.get('type', '')}]-> "
+                    f"{row.get('target_entity', '')}: {row.get('description', '')}"
+                )
+                for row in (phase_b.get("relations") or [])
+            ]
+        )
+        chapters_text = "\n***\n".join(
+            [
+                (
+                    f"Глава {row.get('chapter_id', 'N/A')} "
+                    f"({row.get('title', '')}): {row.get('snippet', '')}"
+                )
+                for row in (phase_b.get("chapters") or [])
+            ]
+        )
+        return {
+            "entities_text": entities_text,
+            "relations_text": relations_text,
+            "chapters_text": chapters_text,
+        }
+
+    def _collect_source_ids(self, docs: List[Document]) -> Set[int]:
+        source_ids: Set[int] = set()
+        for doc in docs:
+            if hasattr(doc, "metadata"):
+                source_id = doc.metadata.get("source_id")
+                chapter_id = doc.metadata.get("chapter_id")
+                if isinstance(source_id, int):
+                    source_ids.add(source_id)
+                if isinstance(chapter_id, int):
+                    source_ids.add(chapter_id)
+        return source_ids
+
     def invoke(self, **kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Выполняет поиск и формирует ответ на запрос пользователя.
@@ -271,114 +338,231 @@ class RetrieveAgent(LLMBase):
             query = kwargs.get("query")
             if not query or not isinstance(query, str):
                 raise ValueError("query must be a non-empty string")
-            
-            # Получаем входные данные для промпта
+
+            trace: List[Dict[str, Any]] = []
             chain_input = self.make_user_prompt_retrieve(query=query)
-            
-            # Выполняем поиск
-            try:
-                search_result = self._retriever.invoke(chain_input)
-            except Exception as e:
-                logger.error(f"Error in retriever.invoke: {e}", exc_info=True)
-                return {"answer": "Ошибка при поиске информации. Попробуйте переформулировать вопрос."}
-            
-            # Разделяем результаты по источникам
-            quote_result = [
-                doc for doc in search_result 
-                if hasattr(doc, 'metadata') and doc.metadata.get("source") == "book"
-            ]
-            nodes_result = [
-                doc for doc in search_result 
-                if hasattr(doc, 'metadata') and doc.metadata.get("source") == "nodes"
-            ]
-            rels_result = [
-                doc for doc in search_result 
-                if hasattr(doc, 'metadata') and doc.metadata.get("source") == "relations"
-            ]
-            sums_result = [
-                doc for doc in search_result 
-                if hasattr(doc, 'metadata') and doc.metadata.get("source") == "summary"
-            ]
-            
-            # Обрабатываем граф знаний
+
+            # Phase A: wide vector high-recall (hints).
+            phase_a_started = time.perf_counter()
+            phase_a = high_recall_search(query=chain_input, k=settings.PHASE_A_RECALL_K)
+            search_result: List[Document] = phase_a.get("documents") or []
+            phase_a_hints: Dict[str, Any] = phase_a.get("hints") or {}
+            trace.append(
+                {
+                    "phase": "phase_a",
+                    "query": query,
+                    "input_hints": {},
+                    "selected_items": phase_a_hints.get("selected_items", []),
+                    "rejected_items": [],
+                    "reason": "vector high-recall retrieval",
+                    "latency_ms": round((time.perf_counter() - phase_a_started) * 1000, 2),
+                }
+            )
+
+            classified = self._classify_search_docs(search_result)
+            quote_result = classified["quote_result"]
+            nodes_result = classified["nodes_result"]
+            rels_result = classified["rels_result"]
+            sums_result = classified["sums_result"]
+
+            # Graph context from vector-retrieved graph docs.
             answer_input = self.process_graph(rels_result, nodes_result)
-            
-            # Форматируем цитаты и суммаризации
-            quote_texts = "\n***\n".join([
-                f"{doc.page_content}. Глава {doc.metadata.get('source_id', 'N/A')}"
-                for doc in quote_result
-                if hasattr(doc, 'page_content')
-            ])
-            
-            sums_texts = "\n***\n".join([
-                f"{doc.page_content}. Глава {doc.metadata.get('source_id', 'N/A')}"
-                for doc in sums_result
-                if hasattr(doc, 'page_content')
-            ])
-            
+
+            quote_texts = "\n***\n".join(
+                [
+                    f"{doc.page_content}. Глава {doc.metadata.get('source_id', doc.metadata.get('chapter_id', 'N/A'))}"
+                    for doc in quote_result
+                    if hasattr(doc, "page_content")
+                ]
+            )
+            sums_texts = "\n***\n".join(
+                [
+                    f"{doc.page_content}. Глава {doc.metadata.get('source_id', doc.metadata.get('chapter_id', 'N/A'))}"
+                    for doc in sums_result
+                    if hasattr(doc, "page_content")
+                ]
+            )
             answer_input["quote_texts"] = quote_texts
             answer_input["sums_texts"] = sums_texts
-            
-            # Извлекаем уникальные source_id из найденных чанков и суммаризаций
-            source_ids = set()
-            for doc in quote_result + sums_result:
-                if hasattr(doc, 'metadata'):
-                    source_id = doc.metadata.get("source_id")
-                    if isinstance(source_id, int):
-                        source_ids.add(source_id)
-            
-            # Получаем полные тексты глав (если включено)
+
+            # Phase B: guided deterministic retrieval over snapshot + graph index.
+            phase_b_started = time.perf_counter()
+            index_hints = search_entity_chapter_index(
+                query=query,
+                hinted_entity_ids=phase_a_hints.get("entity_ids", []),
+                top_k=settings.PHASE_B_MAX_ENTITIES,
+            )
+            combined_hints = {
+                "chapter_ids": sorted(
+                    set(phase_a_hints.get("chapter_ids", []))
+                    .union(set(index_hints.get("chapter_ids", [])))
+                ),
+                "source_ids": list(phase_a_hints.get("source_ids", [])),
+                "entity_ids": list(phase_a_hints.get("entity_ids", [])),
+                "entity_name_tokens": phase_a_hints.get("entity_name_tokens", []),
+            }
+            phase_b = guided_deterministic_search(
+                query=query,
+                input_hints=combined_hints,
+                max_entities=settings.PHASE_B_MAX_ENTITIES,
+                max_relations=settings.PHASE_B_MAX_RELATIONS,
+                max_chapters=settings.PHASE_B_MAX_CHAPTERS,
+            )
+            traversal = traverse_relations_for_entities(
+                entity_names=[row.get("main_name", "") for row in (phase_b.get("entities") or [])],
+                max_edges=settings.PHASE_B_MAX_RELATIONS,
+            )
+            # Добавляем relation traversal как дополнительное подтверждение.
+            existing_rel_ids = {
+                row.get("relation_id") for row in (phase_b.get("relations") or []) if row.get("relation_id")
+            }
+            for rel in traversal.get("selected_items", []):
+                rel_id = rel.get("relation_id")
+                if rel_id and rel_id in existing_rel_ids:
+                    continue
+                (phase_b.setdefault("relations", [])).append(rel)
+
+            trace.append(
+                {
+                    "phase": "phase_b",
+                    "query": query,
+                    "input_hints": combined_hints,
+                    "selected_items": {
+                        "entities": phase_b.get("entities", []),
+                        "relations": phase_b.get("relations", []),
+                        "chapters": phase_b.get("chapters", []),
+                    },
+                    "rejected_items": phase_b.get("rejected_items", {}),
+                    "reason": "guided deterministic retrieval using snapshot + entity index",
+                    "latency_ms": round((time.perf_counter() - phase_b_started) * 1000, 2),
+                }
+            )
+
+            phase_b_context = self._format_phase_b_context(phase_b)
+            if phase_b_context["entities_text"]:
+                answer_input["nodes_texts"] = (
+                    (answer_input.get("nodes_texts", "") + "\n\n" + phase_b_context["entities_text"]).strip()
+                )
+            if phase_b_context["relations_text"]:
+                answer_input["rel_texts"] = (
+                    (answer_input.get("rel_texts", "") + "\n\n" + phase_b_context["relations_text"]).strip()
+                )
+
+            # Phase C: fallback vector pass, if deterministic evidence is weak.
+            phase_c_docs: List[Document] = []
+            need_phase_c = not phase_b.get("entities") and not phase_b.get("relations")
+            phase_c_started = time.perf_counter()
+            if need_phase_c:
+                phase_c = high_recall_search(query=chain_input, k=settings.PHASE_C_FALLBACK_K)
+                phase_c_docs = phase_c.get("documents") or []
+                phase_c_hints = phase_c.get("hints") or {}
+                phase_c_classified = self._classify_search_docs(phase_c_docs)
+
+                add_quotes = "\n***\n".join(
+                    [
+                        f"{doc.page_content}. Глава {doc.metadata.get('source_id', doc.metadata.get('chapter_id', 'N/A'))}"
+                        for doc in phase_c_classified["quote_result"]
+                        if hasattr(doc, "page_content")
+                    ]
+                )
+                if add_quotes:
+                    answer_input["quote_texts"] = (answer_input.get("quote_texts", "") + "\n***\n" + add_quotes).strip()
+
+                trace.append(
+                    {
+                        "phase": "phase_c",
+                        "query": query,
+                        "input_hints": combined_hints,
+                        "selected_items": phase_c_hints.get("selected_items", []),
+                        "rejected_items": [],
+                        "reason": "fallback vector retrieval because deterministic evidence was weak",
+                        "latency_ms": round((time.perf_counter() - phase_c_started) * 1000, 2),
+                    }
+                )
+            else:
+                trace.append(
+                    {
+                        "phase": "phase_c",
+                        "query": query,
+                        "input_hints": combined_hints,
+                        "selected_items": [],
+                        "rejected_items": [],
+                        "reason": "skipped: deterministic evidence is sufficient",
+                        "latency_ms": round((time.perf_counter() - phase_c_started) * 1000, 2),
+                    }
+                )
+
+            # Chapters for grounding context (guided by A/B hints).
+            source_ids = self._collect_source_ids(quote_result + sums_result + phase_c_docs)
+            source_ids.update(phase_b.get("chapter_ids") or [])
             chapters_texts = ""
             if settings.INCLUDE_FULL_CHAPTERS and source_ids:
                 try:
-                    from src.agent.vector_store.chapter_retriever import ChapterRetriever
-                    
                     chapter_retriever = ChapterRetriever()
-                    
-                    # Ограничиваем количество глав
-                    source_ids_list = sorted(list(source_ids))[:settings.MAX_CHAPTERS_IN_CONTEXT]
-                    chapters_dict = chapter_retriever.get_chapters_by_source_ids(
-                        source_ids_list,
-                        max_chapters=settings.MAX_CHAPTERS_IN_CONTEXT
+                    chapters_result = chapter_retriever.get_guided_chapters(
+                        hint_chapter_ids=sorted(source_ids),
+                        max_chapters=settings.MAX_CHAPTERS_IN_CONTEXT,
                     )
-                    
-                    # Форматируем тексты глав с учетом ограничений по токенам
                     chapters_texts = self._format_chapters_text(
-                        chapters_dict,
-                        max_tokens_per_chapter=settings.MAX_CHAPTER_TOKENS
+                        chapters_result.get("chapters", {}),
+                        max_tokens_per_chapter=settings.MAX_CHAPTER_TOKENS,
                     )
-                    
                 except Exception as e:
                     logger.warning(f"Не удалось загрузить главы: {e}", exc_info=True)
                     chapters_texts = ""
-            
             answer_input["chapters_texts"] = chapters_texts
-            
-            # Формируем финальный ответ
+            if phase_b_context["chapters_text"]:
+                answer_input["chapters_texts"] = (
+                    (answer_input.get("chapters_texts", "") + "\n\n" + phase_b_context["chapters_text"]).strip()
+                )
+
+            # Grounding trace before generation.
+            evidence_refs = []
+            evidence_refs.extend(
+                [{"type": "entity", "entity_id": row.get("entity_id")} for row in (phase_b.get("entities") or [])]
+            )
+            evidence_refs.extend(
+                [{"type": "relation", "relation_id": row.get("relation_id")} for row in (phase_b.get("relations") or [])]
+            )
+            evidence_refs.extend(
+                [{"type": "chapter", "chapter_id": row.get("chapter_id")} for row in (phase_b.get("chapters") or [])]
+            )
+            trace.append(
+                {
+                    "phase": "grounding",
+                    "query": query,
+                    "input_hints": {"source_ids": sorted(source_ids)},
+                    "selected_items": evidence_refs,
+                    "rejected_items": [],
+                    "reason": "final evidence set passed to generator",
+                    "latency_ms": 0.0,
+                    "evidence_refs": evidence_refs,
+                }
+            )
+
             try:
                 answer_input_query = self.make_user_prompt(query, answer_input)
                 result = self.make_llm_chain().invoke(answer_input_query)
                 output = self._process_output(result)
-                
-                # Обрабатываем результат
                 if isinstance(output, dict):
+                    output["trace"] = trace
                     return output
-                elif isinstance(output, str):
-                    return {"answer": output}
-                else:
-                    logger.warning(f"Unexpected output type: {type(output)}")
-                    return {"answer": str(output)}
-                    
+                if hasattr(output, "answer"):
+                    return {"answer": getattr(output, "answer", ""), "trace": trace}
+                if isinstance(output, str):
+                    return {"answer": output, "trace": trace}
+                logger.warning(f"Unexpected output type: {type(output)}")
+                return {"answer": str(output), "trace": trace}
             except Exception as e:
                 logger.error(f"Error in LLM chain: {e}", exc_info=True)
-                return {"answer": "Ошибка при формировании ответа. Попробуйте переформулировать вопрос."}
-                
+                return {"answer": "Ошибка при формировании ответа. Попробуйте переформулировать вопрос.", "trace": trace}
+
         except ValueError as e:
             logger.error(f"Validation error in invoke: {e}", exc_info=True)
             raise
         except Exception as e:
             logger.error(f"Unexpected error in invoke: {e}", exc_info=True)
-            return {"answer": "Произошла неожиданная ошибка при обработке запроса."}
+            return {"answer": "Произошла неожиданная ошибка при обработке запроса.", "trace": []}
 
     def make_user_prompt_retrieve(self, query: str) -> str:
         """

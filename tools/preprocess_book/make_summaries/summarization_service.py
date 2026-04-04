@@ -114,6 +114,11 @@ class SummarizationService:
 
                 all_summarizations.append(summary_text)
                 logger.debug(f"Создана суммаризация для source_id {source_id}")
+                if isinstance(source_id, int) and source_id % 5 == 0:
+                    logger.info(
+                        "Summaries progress marker: chapter source_id=%s",
+                        source_id,
+                    )
 
             except Exception as e:
                 source_id = (

@@ -140,6 +140,11 @@ class GraphBuilder:
                         relation_graphs,
                         GRAPH_RELATIONS_DIR / filename,
                     )
+                    if source_id and isinstance(source_id[0], int) and source_id[0] % 5 == 0:
+                        logger.info(
+                            "Graph build progress marker: chapter source_id=%s",
+                            source_id[0],
+                        )
                 return True
             except Exception as ex:  # noqa: BLE001
                 logger.error(f"Error processing {filename}: {ex}", exc_info=True)

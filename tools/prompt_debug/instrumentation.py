@@ -169,6 +169,7 @@ class AgentDiagnosticsInstrumentation:
             try:
                 result = original_retrieve_invoke(*args, **kwargs)
                 answer = result.get("answer", "") if isinstance(result, dict) else str(result)
+                trace = result.get("trace", []) if isinstance(result, dict) else []
                 self._log(
                     "retrieve_generation",
                     {
@@ -177,6 +178,23 @@ class AgentDiagnosticsInstrumentation:
                         "answer_preview": _safe_preview(answer, 360),
                     },
                 )
+                if isinstance(trace, list):
+                    for phase_item in trace:
+                        if not isinstance(phase_item, dict):
+                            continue
+                        phase_name = str(phase_item.get("phase", "phase_unknown"))
+                        self._log(
+                            phase_name,
+                            {
+                                "query": phase_item.get("query", kwargs.get("query", "")),
+                                "input_hints": phase_item.get("input_hints", {}),
+                                "selected_items": phase_item.get("selected_items", []),
+                                "rejected_items": phase_item.get("rejected_items", []),
+                                "reason": phase_item.get("reason", ""),
+                                "latency_ms": phase_item.get("latency_ms"),
+                                "evidence_refs": phase_item.get("evidence_refs", []),
+                            },
+                        )
                 return result
             except Exception as ex:  # noqa: BLE001
                 self._log("retrieve_generation_error", {"error": str(ex)})

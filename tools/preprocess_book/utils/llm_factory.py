@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Optional
 from langchain_core.language_models import BaseLanguageModel
 from langchain_deepseek import ChatDeepSeek
@@ -6,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from tools.preprocess_book.config.preprocess_settings import (
     LLM_TYPE,
     DEEPSEEK_API_KEY,
+    DEEPSEEK_API_BASE,
     OPENAI_API_KEY,
     OPENAI_API_BASE,
     OPENAI_API_MODEL,
@@ -40,6 +42,9 @@ def create_llm(
         llm_type = LLM_TYPE
     
     if llm_type == "deepseek":
+        # DeepSeek client in langchain uses OpenAI-compatible transport under the hood.
+        # Suppress internal openai logger noise so deepseek runs stay provider-clean in logs.
+        logging.getLogger("openai").setLevel(logging.ERROR)
         api_key = kwargs.get("api_key") or DEEPSEEK_API_KEY
         if not api_key:
             raise ValueError("DEEPSEEK_API_KEY не установлен в переменных окружения")
@@ -51,7 +56,12 @@ def create_llm(
             timeout=None,
             max_retries=max_retries,
             api_key=api_key,
-            **{k: v for k, v in kwargs.items() if k != "api_key"}
+            api_base=kwargs.get("api_base") or DEEPSEEK_API_BASE,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k not in {"api_key", "api_base", "openai_api_base"}
+            }
         )
     
     elif llm_type == "chatgpt" or llm_type == "openai":

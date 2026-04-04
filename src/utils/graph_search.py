@@ -1,8 +1,12 @@
 import logging
 import pickle
+import json
+import re
+from functools import lru_cache
+from pathlib import Path
 import src.config.settings as settings
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Dict, Tuple, Any, Set
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +15,8 @@ logger = logging.getLogger(__name__)
 class Action:
     action: str
     source_id: Tuple[int]
+    chapter_id: Optional[int] = None
+    quotes: Optional[List[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -36,6 +42,8 @@ class Description:
     description: str
     type: str
     source_id: Tuple[int]
+    chapter_id: Optional[int] = None
+    quotes: Optional[List[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -81,3 +89,131 @@ except Exception as e:
         nodes=AllBookNodes(nodes={}, names_list={}),
         relationships=AllBooksEdges(relationships={}),
     )
+
+
+def _tokenize(text: str) -> Set[str]:
+    if not text:
+        return set()
+    return {t for t in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", text.lower()) if len(t) >= 3}
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+@lru_cache(maxsize=2)
+def _load_snapshot_indexes(snapshot_dir: str) -> Dict[str, List[Dict[str, Any]]]:
+    base = Path(snapshot_dir)
+    return {
+        "entity_chapter_index": _read_jsonl(base / "entity_chapter_index.jsonl"),
+        "relations_merged": _read_jsonl(base / "relations_merged.jsonl"),
+    }
+
+
+def search_entity_chapter_index(
+    query: str,
+    hinted_entity_ids: Optional[List[str]] = None,
+    snapshot_dir: Optional[str] = None,
+    top_k: int = 10,
+) -> Dict[str, Any]:
+    """
+    Поиск кандидатов по entity_chapter_index для guided deterministic retrieval.
+    """
+    snapshot = _load_snapshot_indexes(snapshot_dir or settings.SNAPSHOT_DIR)
+    rows = snapshot["entity_chapter_index"]
+    hinted = {x for x in (hinted_entity_ids or []) if isinstance(x, str)}
+    q_tokens = _tokenize(query)
+
+    scored: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for row in rows:
+        text = " ".join(
+            [str(row.get("main_name", ""))]
+            + [str(x) for x in (row.get("aliases") or [])]
+        )
+        overlap = q_tokens.intersection(_tokenize(text))
+        score = float(len(overlap))
+        if row.get("entity_id") in hinted:
+            score += 2.0
+        if score <= 0:
+            rejected.append({"entity_id": row.get("entity_id"), "reason": "no_overlap"})
+            continue
+        scored.append(
+            {
+                "entity_id": row.get("entity_id"),
+                "main_name": row.get("main_name"),
+                "chapters": row.get("chapters") or [],
+                "aliases": row.get("aliases") or [],
+                "mentions_count": row.get("mentions_count", 0),
+                "score": score,
+            }
+        )
+    scored.sort(key=lambda x: (x["score"], x.get("mentions_count", 0)), reverse=True)
+    selected = scored[:top_k]
+
+    chapter_ids: Set[int] = set()
+    for item in selected:
+        for cid in item.get("chapters", []):
+            if isinstance(cid, int):
+                chapter_ids.add(cid)
+
+    return {
+        "entities": selected,
+        "chapter_ids": sorted(chapter_ids),
+        "selected_items": selected,
+        "rejected_items": rejected[:30],
+        "reason": "entity_chapter_index lookup",
+    }
+
+
+def traverse_relations_for_entities(
+    entity_names: List[str],
+    snapshot_dir: Optional[str] = None,
+    max_edges: int = 25,
+) -> Dict[str, Any]:
+    """
+    Ограниченный traversal по relations_merged:
+    оставляем ребра, где хотя бы одна сторона в релевантных сущностях.
+    """
+    snapshot = _load_snapshot_indexes(snapshot_dir or settings.SNAPSHOT_DIR)
+    relations = snapshot["relations_merged"]
+    names = {n.lower() for n in entity_names if isinstance(n, str) and n.strip()}
+
+    selected: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for rel in relations:
+        src = str(rel.get("source_entity", "")).lower()
+        dst = str(rel.get("target_entity", "")).lower()
+        if src in names or dst in names:
+            selected.append(
+                {
+                    "relation_id": rel.get("relation_id"),
+                    "source_entity": rel.get("source_entity"),
+                    "target_entity": rel.get("target_entity"),
+                    "type": rel.get("type"),
+                    "description": rel.get("description"),
+                    "chapter_id": rel.get("chapter_id"),
+                }
+            )
+            if len(selected) >= max_edges:
+                break
+        else:
+            rejected.append({"relation_id": rel.get("relation_id"), "reason": "outside_entity_scope"})
+
+    return {
+        "selected_items": selected,
+        "rejected_items": rejected[:30],
+        "reason": "limited relation traversal",
+    }

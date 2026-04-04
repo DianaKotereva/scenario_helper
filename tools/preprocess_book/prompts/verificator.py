@@ -74,6 +74,27 @@ class Verification(LLMBase):
         existing_kinship_aliases: List[str] | None = None,
         new_kinship_aliases: List[str] | None = None,
     ) -> Dict[str, Any]:
+        def _flatten_actions(actions: Any) -> str:
+            if isinstance(actions, str):
+                return actions
+            if not isinstance(actions, list):
+                return ""
+            chunks: List[str] = []
+            for item in actions:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        chunks.append(text)
+                    continue
+                if isinstance(item, dict):
+                    desc = str(item.get("description", "")).strip()
+                    if not desc:
+                        continue
+                    sid = item.get("source_id")
+                    cid = item.get("chapter_id")
+                    chunks.append(f"[source_id={sid} chapter_id={cid}] {desc}")
+            return ". ".join(chunks)
+
         main_name = node.main_name
         alt_names = node.alt_names
         classification = node.classification
@@ -94,7 +115,7 @@ class Verification(LLMBase):
                 "alt_names": new_node.get("alt_names", []),
                 "kinship_aliases": new_kinship_aliases or [],
                 "classification": new_node.get("classification", ""),
-                "actions": new_node.get("actions", ""),
+                "actions": _flatten_actions(new_node.get("actions", "")),
             },
             "output_schema_hint": {
                 "is_same_entity": "bool",

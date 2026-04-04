@@ -1,48 +1,68 @@
-from typing import Dict, Any
-from langchain_core.output_parsers import JsonOutputParser
+from __future__ import annotations
+
+from enum import Enum
+from typing import Any, Dict, List, Optional, Sequence
+
+from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field, validator
+
 from src.llm_core.llm_prompt_base import LLMBase
 
 
-system_prompt = """Ты профессиональный анализатор текстов, преобразующий художественные произведения в детализированные семантические графы.
-Старайся извлекать как можно больше информации из текста, не жертвуя точностью. Не добавляйте данные, которые явно не упомянуты в тексте.
-Цель — обеспечить четкость и структурированность графа знаний, чтобы он в полной мере отражал содержание художественного произведения.
-Учти, что твои графы будут использованы в создании Голливудских фильмов, поэтому если ты плохо сделаешь граф, то тебя подвергнут большому штрафу и суду.
+CLASS_CHARACTER = "персонаж"
+CLASS_PLACE = "место"
+CLASS_ORG = "организация"
+CLASS_TERM = "термин"
+CLASS_FORCE = "сила природы"
+
+
+system_prompt = f"""Ты профессиональный анализатор текстов, преобразующий художественные произведения в детализированные семантические графы.
+Старайся извлекать как можно больше информации из текста, не жертвуя точностью. Не добавляй данные, которые явно не упомянуты в тексте.
+Цель - обеспечить четкость и структурированность графа знаний, чтобы он в полной мере отражал содержание художественного произведения.
 
 ### Входные данные:
-Текст - отрывок главы книги.
+Текст - отрывок главы книги или несколько глав с разметкой [CHAPTER source_id=... chapter_id=...].
 
 ### Правила обработки:
 
-Ты должен отвечать СТРОГО на русском языке. 
+Ты должен отвечать СТРОГО на русском языке.
 
 1. Извлеки именованные сущности как узлы графа:
    - main_name: каноническое имя (выбирай наиболее устойчивое в контексте всей книги)
-   - alt_names: все варианты именования (только осмысленные синонимы, которые могут выделять только этого персонажа/место/организацию и пр. Не выделяй слишком общеупотребимые синонимы, которые можно применить ко многим персонажам, типа "мужчина"/"девушка"/"муж"/"отец" и тд.)
-   - actions: суммарное описание действий/роли в главе (сохраняй причинно-следственные связи)
-   - classification: строго один из ['персонаж', 'место', 'организация', 'термин', 'сила природы']
+   - alt_names: все варианты именования (только осмысленные синонимы)
+   - actions: суммарное описание действий/роли в виде СПИСКА объектов:
+     {{"source_id": int, "chapter_id": int, "description": str}}
+   - classification: строго один из ['{CLASS_CHARACTER}', '{CLASS_PLACE}', '{CLASS_ORG}', '{CLASS_TERM}', '{CLASS_FORCE}']
 
 2. Установи связи между узлами:
    - source/target_node_id: СТРОГО main_name связанных сущностей
-   - type: глагол действия в формате "СОВЕРШАЕТ_ДЕЙСТВИЕ" (на русском, present continuous)
-   - description: полный контекст взаимодействия (кто, что, кому, когда, зачем). Убедись, что description в связи бьется с actions с nodes.
+   - type: глагол действия в формате "СОВЕРШАЕТ_ДЕЙСТВИЕ" (на русском)
+   - descriptions: полный контекст взаимодействия в виде СПИСКА объектов:
+     {{"source_id": int, "chapter_id": int, "description": str}}
    - Учитывай как прямые, так и косвенные связи через события
 
 3. Сделай небольшую суммаризацию текста не более 1-2 абзацев.
 
 4. Приоритеты:
-   - Сохраняй максимальный контекст: даже если связь кажется очевидной, фиксируй нюансы
-   - Избегай генерации новых фактов - только явные или логически обязательные связи из текста
-   - Для конфликтов и трансформаций создавай отдельные связи с разными типами
+   - Сохраняй максимальный контекст
+   - Избегай генерации новых фактов
+   - Для конфликтов и трансформаций создавай отдельные связи с разными type
 
 ### Выходной формат:
-{{"nodes": [
+{{
+  "nodes": [
     {{
       "main_name": str,
       "alt_names": list[str],
-      "actions": str,
+      "actions": [
+        {{
+          "source_id": int,
+          "chapter_id": int,
+          "description": str
+        }}
+      ],
       "classification": str
-    }},
-    ...
+    }}
   ],
   "relations": [
     {{
@@ -51,41 +71,122 @@ system_prompt = """Ты профессиональный анализатор т
       "target_node_id": str,
       "target_node_type": str,
       "type": str,
-      "description": str
-    }},
-    ...
+      "descriptions": [
+        {{
+          "source_id": int,
+          "chapter_id": int,
+          "description": str
+        }}
+      ]
+    }}
   ],
   "summarization": str
-}}"""
+}}
+"""
+
+
+class EntityClassification(str, Enum):
+    PERSON = CLASS_CHARACTER
+    PLACE = CLASS_PLACE
+    ORG = CLASS_ORG
+    TERM = CLASS_TERM
+    FORCE = CLASS_FORCE
+
+
+class EvidenceItem(BaseModel):
+    source_id: int = Field(..., description="Source chapter id")
+    chapter_id: int = Field(..., description="Chapter id")
+    description: str = Field(..., min_length=3)
+
+    @validator("description")
+    def _validate_description(cls, value: str) -> str:
+        val = (value or "").strip()
+        if len(val) < 3:
+            raise ValueError("description must contain at least 3 chars")
+        return val
+
+
+class ExtractedNode(BaseModel):
+    main_name: str = Field(..., min_length=1)
+    alt_names: List[str] = Field(default_factory=list)
+    actions: List[EvidenceItem] = Field(default_factory=list)
+    classification: EntityClassification
+
+    @validator("main_name")
+    def _validate_main_name(cls, value: str) -> str:
+        val = (value or "").strip()
+        if not val:
+            raise ValueError("main_name cannot be empty")
+        return val
+
+    @validator("alt_names", each_item=True)
+    def _validate_alt_names(cls, value: str) -> str:
+        return (value or "").strip()
+
+
+class ExtractedRelation(BaseModel):
+    source_node_id: str = Field(..., min_length=1)
+    source_node_type: str = Field(..., min_length=1)
+    target_node_id: str = Field(..., min_length=1)
+    target_node_type: str = Field(..., min_length=1)
+    type: str = Field(..., min_length=1)
+    descriptions: List[EvidenceItem] = Field(default_factory=list)
+
+
+class ExtractionPayload(BaseModel):
+    nodes: List[ExtractedNode] = Field(default_factory=list)
+    relations: List[ExtractedRelation] = Field(default_factory=list)
+    summarization: str = Field(default="")
 
 
 class ExtractNames(LLMBase):
-    """Класс для извлечения именованных сущностей и отношений из текста."""
-    
-    def __init__(self, llm, parser: JsonOutputParser = None):
-        """
-        Args:
-            llm: Инициализированная языковая модель
-            parser: Парсер для JSON вывода (по умолчанию JsonOutputParser)
-        """
+    """Extractor with pydantic schema."""
+
+    def __init__(self, llm, parser: Optional[PydanticOutputParser] = None):
         if parser is None:
-            parser = JsonOutputParser()
+            parser = PydanticOutputParser(pydantic_object=ExtractionPayload)
         super().__init__(
             llm=llm,
             system_prompt=system_prompt,
             parser=parser,
-            parse_json=True
+            parse_json=True,
         )
-    
-    def make_user_prompt(self, text: str) -> Dict[str, Any]:
-        """
-        Форматирует пользовательский промпт для экстракции.
-        
-        Args:
-            text: Текст для обработки
-            
-        Returns:
-            Словарь с сообщениями для LLM
-        """
-        user_prompt = f"Текст: {text}"
+
+    @staticmethod
+    def _to_source_ids(source_id: Any) -> List[int]:
+        if source_id is None:
+            return []
+        if isinstance(source_id, int):
+            return [source_id]
+        if isinstance(source_id, (tuple, list)):
+            return [int(x) for x in source_id if isinstance(x, int)]
+        return []
+
+    @staticmethod
+    def _render_chapter_blocks(chapter_blocks: Sequence[Dict[str, Any]]) -> str:
+        rendered: List[str] = []
+        for block in chapter_blocks:
+            sid = block.get("source_id")
+            cid = block.get("chapter_id", sid)
+            text = (block.get("text") or "").strip()
+            if sid is None or not text:
+                continue
+            rendered.append(
+                f"[CHAPTER source_id={sid} chapter_id={cid}]\\n{text}\\n[/CHAPTER]"
+            )
+        return "\\n\\n".join(rendered)
+
+    def make_user_prompt(
+        self,
+        text: str,
+        source_id: Any = None,
+        chapter_blocks: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        source_ids = self._to_source_ids(source_id)
+        text_payload = self._render_chapter_blocks(chapter_blocks) if chapter_blocks else text
+
+        if source_ids:
+            user_prompt = f"source_ids: {source_ids}\\nТекст: {text_payload}"
+        else:
+            user_prompt = f"Текст: {text_payload}"
         return {"messages": [("user", user_prompt)]}

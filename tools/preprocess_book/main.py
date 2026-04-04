@@ -230,7 +230,7 @@ def main():
         # Создание промптов
         logger.info("Создание промптов...")
         json_parser = JsonOutputParser()
-        extractor = ExtractNames(llm=llm, parser=json_parser)
+        extractor = ExtractNames(llm=llm)
         verificator = Verification(llm=llm, parser=json_parser)
 
         # Инициализация сервисов

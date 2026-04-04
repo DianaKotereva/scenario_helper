@@ -33,6 +33,14 @@ CHAPTERS_INDEX_NAME: str = os.getenv("CHAPTERS_INDEX_NAME", f"{ES_INDEX_NAME}cha
 INCLUDE_FULL_CHAPTERS: bool = os.getenv("INCLUDE_FULL_CHAPTERS", "True") == "True"
 MAX_CHAPTERS_IN_CONTEXT: int = int(os.getenv("MAX_CHAPTERS_IN_CONTEXT", "3"))
 MAX_CHAPTER_TOKENS: int = int(os.getenv("MAX_CHAPTER_TOKENS", "15000"))
+SNAPSHOT_DIR: str = os.getenv("SNAPSHOT_DIR", "tools/preprocess_book/_snapshot25_p0")
+
+# Гибридный retrieval (P1)
+PHASE_A_RECALL_K: int = int(os.getenv("PHASE_A_RECALL_K", "20"))
+PHASE_C_FALLBACK_K: int = int(os.getenv("PHASE_C_FALLBACK_K", "30"))
+PHASE_B_MAX_ENTITIES: int = int(os.getenv("PHASE_B_MAX_ENTITIES", "10"))
+PHASE_B_MAX_RELATIONS: int = int(os.getenv("PHASE_B_MAX_RELATIONS", "20"))
+PHASE_B_MAX_CHAPTERS: int = int(os.getenv("PHASE_B_MAX_CHAPTERS", "5"))
 
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE: str = os.getenv("OPENAI_API_BASE", "https://api.proxyapi.ru/openai/v1")

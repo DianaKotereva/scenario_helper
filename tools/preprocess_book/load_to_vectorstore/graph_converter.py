@@ -79,6 +79,8 @@ def book_graph_to_documents(book_graph: BookGraph) -> List[Document]:
                 "schema_version": GRAPH_SCHEMA_VERSION,
                 "source": "nodes",
                 "source_id": source_id,
+                # В нашем корпусе source_id граф-факта эквивалентен chapter_id.
+                "chapter_id": source_id,
                 "graph_doc_type": "node_fact",
                 "entity_name": node_name,
                 "entity_classification": getattr(node, "classification", ""),
@@ -117,6 +119,8 @@ def book_graph_to_documents(book_graph: BookGraph) -> List[Document]:
                 "schema_version": GRAPH_SCHEMA_VERSION,
                 "source": "relations",
                 "source_id": source_id,
+                # В нашем корпусе source_id граф-факта эквивалентен chapter_id.
+                "chapter_id": source_id,
                 "graph_doc_type": "relation_fact",
                 "relation_object_1": object_1,
                 "relation_object_2": object_2,
