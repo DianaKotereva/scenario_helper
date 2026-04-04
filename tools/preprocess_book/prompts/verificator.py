@@ -1,119 +1,115 @@
-from typing import Dict, Any, Tuple
+import json
+from typing import Any, Dict, List, Tuple
+
 from langchain_core.output_parsers import JsonOutputParser
+
 from src.llm_core.llm_prompt_base import LLMBase
 from src.utils.graph_search import BookNode
 
 
 system_prompt = """
-**Ты - Агент верификации сущностей. Твоя задача - определить, относятся ли существующее и новое описания к ОДНОЙ И ТОЙ ЖЕ сущности (персонаж/место/объект).**
-Учти, что результат верификации будет использован в создании Голливудских фильмов, поэтому если ты плохо проверишь, то тебя подвергнут большому штрафу и суду.
+Ты — агент верификации сущностей в литературном графе знаний.
+Нужно определить, относятся ли два описания к одной и той же сущности.
 
-**Входные данные:**
-1. `Существующее описание` (из базы знаний): 
-   - main_name, classification, actions, контекстные атрибуты
-2. `Новое описание` (из текущей главы): 
-   - main_name, classification, actions, контекстные атрибуты
+Важно:
+1) Совпадение имени само по себе недостаточно.
+2) Для тёзок разных поколений (например, «отец/сын/внук») по умолчанию ставь `is_same_entity=false`.
+3) Разрешай merge тёзок только при явном текстовом доказательстве одной идентичности:
+- прямое указание на переименование/алиас,
+- явное подтверждение, что это тот же персонаж в иной роли/форме.
+4) Если есть конфликт родственных якорей, ставь `is_same_entity=false` и заполняй `hard_conflict_flags`.
 
-**Правила анализа:**
-1. **Критерии идентичности** (все условия ДОЛЖНЫ выполняться):
-   - ✅ Совпадение `main_name` ИЛИ явное указание на переименование
-   - ✅ Совпадение `classification` (персонаж/место/организация и т.д.)
-   - ✅ Семантическая согласованность `actions` (новые действия логично продолжают старые)
-   - ✅ Отсутствие **конфликтующих атрибутов** (противоречивые описания внешности, места, статуса)
+Критерии merge (должны быть совместимы):
+- классификация сущности;
+- уникальные идентификаторы (main_name/устойчивые alias);
+- совместимость действий и биографии;
+- отсутствие противоречий по родству/поколению/роли.
 
-2. **Автоматический отказ** (если ЛЮБОЕ из условий):
-   - ❌ Разные `classification` (например: существующее - "персонаж", новое - "место")
-   - ❌ Конфликт уникальных идентификаторов (разные имена без указания переименования)
-   - ❌ Несовместимые физические/временные параметры (персонаж в двух местах одновременно без объяснения)
+Автоматический reject:
+- разные classification;
+- конфликт уникальных идентификаторов без явного моста;
+- конфликт поколений/родства;
+- взаимно исключающие биографические факты.
 
-3. **Контекстные нюансы:**
-   - Учитывай альтернативные имена (`alt_names`) при проверке
-   - Разрешай правдоподобное развитие атрибутов (изменение внешности, статуса)
-   - Игнорируй общеупотребительные эпитеты ("красивый", "старый") как нерелевантные
-
-**Выходной формат (СТРОГО JSON):**
-```json
-{{
+Требуемый JSON-ответ (строго, без дополнительного текста):
+{
   "is_same_entity": bool,
-  "confidence": "высокий/средний/низкий",
-  "key_evidence": [список строк с ключевыми подтверждающими фактами],
-  "conflicting_attributes": [список строк с несовместимыми атрибутами]
-}}
-```
+  "confidence": "высокий|средний|низкий",
+  "key_evidence": [str, ...],
+  "conflicting_attributes": [str, ...],
+  "hard_conflict_flags": [str, ...],
+  "kinship_anchors": {
+    "child_of": [str, ...],
+    "parent_of": [str, ...],
+    "grandchild_of": [str, ...]
+  },
+  "merge_blocked_by": str | null
+}
 
-### Примеры решений:
-1️⃣ **Идентичные сущности**  
-Существующее: {{"main_name": "Замок Дракона", "classification": "место", "actions": "Логово дракона Нидхёгга"}}  
-Новое: {{"main_name": "Драконье Гнездо", "classification": "место", "actions": "Обитель Нидхёгга"}}  
-➔ Выход: {{"is_same_entity": true, "confidence": "высокий", ...}}
-
-2️⃣ **Разные сущности**  
-Существующее: {{"main_name": "Капитан Рейв", "classification": "персонаж", "actions": "Добрый паладин и страж закона"}}  
-Новое: {{"main_name": "Капитан Рейв", "classification": "персонаж", "actions": "Возглавляет гильдию воров"}}  
-➔ Выход: {{"is_same_entity": false, "conflicting_attributes": ["Добрый паладин vs Возглавляет гильдию"]}}
-
-3️⃣ **Пограничный случай**  
-Существующее: {{"main_name": "Аэлита", "alt_names": ["Королева Теней"], ...}}  
-Новое: {{"main_name": "Неизвестная ассасин", ...}}  
-➔ Выход: {{"is_same_entity": false, "confidence": "низкий", "key_evidence": ["Нет совпадающих уникальных идентификаторов"]}}"""
+Правила для `kinship_anchors`:
+- заполняй только по данным из входа (без выдумывания),
+- если данных нет, возвращай пустые списки.
+"""
 
 
 class Verification(LLMBase):
     """Класс для верификации сущностей."""
-    
+
     def __init__(self, llm, parser: JsonOutputParser = None):
-        """
-        Args:
-            llm: Инициализированная языковая модель
-            parser: Парсер для JSON вывода (по умолчанию JsonOutputParser)
-        """
         if parser is None:
             parser = JsonOutputParser()
         super().__init__(
             llm=llm,
             system_prompt=system_prompt,
             parser=parser,
-            parse_json=True
+            parse_json=True,
         )
-    
+
     def make_user_prompt(
         self,
         node: BookNode,
         new_node: Dict[str, Any],
-        source_id: Tuple[int],
-        last_n: int = -10
+        source_id: Tuple[int, ...],
+        last_n: int = -10,
+        existing_kinship_aliases: List[str] | None = None,
+        new_kinship_aliases: List[str] | None = None,
     ) -> Dict[str, Any]:
-        """
-        Форматирует пользовательский промпт для верификации.
-        
-        Args:
-            node: Существующий узел BookNode
-            new_node: Новый узел в виде словаря
-            source_id: ID источника
-            last_n: Количество последних действий для сравнения
-            
-        Returns:
-            Словарь с сообщениями для LLM
-        """
         main_name = node.main_name
         alt_names = node.alt_names
         classification = node.classification
         all_prev_actions = ". ".join([i.action for i in node.actions][last_n:])
-        
-        user_prompt = [
-            "**Существующее**: {{",
-            f'"main_name": {main_name},',
-            f'"alt_names": {alt_names}',
-            f'"classification": {classification}',
-            f'"actions": {all_prev_actions}',
-            "}}",
-            "\n\n\n",
-            "**Новое**: {{",
-            f'"main_name": {new_node["main_name"]}, ',
-            f'"alt_names": {new_node["alt_names"]}',
-            f'"classification": {new_node["classification"]}',
-            f'"actions": {new_node["actions"]}',
-            "}}",
-        ]
-        user_prompt = "\n".join(user_prompt)
+
+        payload = {
+            "task": "entity_verification",
+            "source_id": list(source_id),
+            "existing_entity": {
+                "main_name": main_name,
+                "alt_names": alt_names,
+                "kinship_aliases": existing_kinship_aliases or [],
+                "classification": classification,
+                "actions": all_prev_actions,
+            },
+            "new_entity": {
+                "main_name": new_node.get("main_name", ""),
+                "alt_names": new_node.get("alt_names", []),
+                "kinship_aliases": new_kinship_aliases or [],
+                "classification": new_node.get("classification", ""),
+                "actions": new_node.get("actions", ""),
+            },
+            "output_schema_hint": {
+                "is_same_entity": "bool",
+                "confidence": "высокий|средний|низкий",
+                "key_evidence": "list[str]",
+                "conflicting_attributes": "list[str]",
+                "hard_conflict_flags": "list[str]",
+                "kinship_anchors": {
+                    "child_of": "list[str]",
+                    "parent_of": "list[str]",
+                    "grandchild_of": "list[str]",
+                },
+                "merge_blocked_by": "str|null",
+            },
+        }
+
+        user_prompt = json.dumps(payload, ensure_ascii=False, indent=2)
         return {"messages": [("user", user_prompt)]}

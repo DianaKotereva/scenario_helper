@@ -1,0 +1,169 @@
+{
+  "export": {
+    "output_dir": "tools\\preprocess_book\\_snapshot25_p0",
+    "counts": {
+      "chapters": 25,
+      "chunks": 209,
+      "entities": 2241,
+      "relations": 3285,
+      "entity_chapter_index": 138
+    },
+    "chapter_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24
+    ],
+    "raw_entities": 2103,
+    "merged_entities": 138,
+    "raw_relations": 3038,
+    "merged_relations": 247
+  },
+  "validation": {
+    "status": "ok",
+    "counts": {
+      "chapters": 25,
+      "chunks": 209,
+      "entities_total": 2241,
+      "entities_raw": 2103,
+      "entities_merged": 138,
+      "relations_total": 3285,
+      "relations_raw": 3038,
+      "relations_merged": 247,
+      "entity_chapter_index": 138
+    },
+    "merge_checks": {
+      "merged_without_chapters": 0,
+      "merged_relation_orphans": 0,
+      "alias_collision_count": 14
+    },
+    "errors": [],
+    "warnings": [
+      {
+        "type": "alias_collisions",
+        "count": 14,
+        "sample": [
+          {
+            "alias": "король-чародей",
+            "entity_ids": [
+              "merged_ent:6e770cdac909a0739a84f35acfdb5badd4942da2",
+              "merged_ent:c6975865a31c556222fefc556fb8f8c440dd5808"
+            ]
+          },
+          {
+            "alias": "сын аэнариона",
+            "entity_ids": [
+              "merged_ent:6e770cdac909a0739a84f35acfdb5badd4942da2",
+              "merged_ent:c6975865a31c556222fefc556fb8f8c440dd5808"
+            ]
+          },
+          {
+            "alias": "феанаро",
+            "entity_ids": [
+              "merged_ent:6e770cdac909a0739a84f35acfdb5badd4942da2",
+              "merged_ent:c6975865a31c556222fefc556fb8f8c440dd5808"
+            ]
+          },
+          {
+            "alias": "наро",
+            "entity_ids": [
+              "merged_ent:baaa6aff12a48ad21896fc93d6372a4f9d019578",
+              "merged_ent:c6975865a31c556222fefc556fb8f8c440dd5808"
+            ]
+          },
+          {
+            "alias": "эльда",
+            "entity_ids": [
+              "merged_ent:3e48f2ee30b5499ca0df81ac45bdfbfdab61d968",
+              "merged_ent:c6975865a31c556222fefc556fb8f8c440dd5808"
+            ]
+          },
+          {
+            "alias": "айнур",
+            "entity_ids": [
+              "merged_ent:3c0f964377d27a4f466b9be549ed7f9c9627204c",
+              "merged_ent:782cfc43dcf667f6d12ee3c86ecbc6c05b105d40"
+            ]
+          },
+          {
+            "alias": "махтан",
+            "entity_ids": [
+              "merged_ent:1b95454840c934c3f23c5bfa37d1119ad9ca32d4",
+              "merged_ent:8a1feca29a559919ad02067dde75f5166dd04536"
+            ]
+          },
+          {
+            "alias": "индис",
+            "entity_ids": [
+              "merged_ent:ad2aaa3a721265544e8d25853d05142acb2e2686",
+              "merged_ent:ec9988824b3f52a624e2b5afbf138f531be8b2b3"
+            ]
+          },
+          {
+            "alias": "мандос",
+            "entity_ids": [
+              "merged_ent:512b9bb60dc89de58f53dbd20e63203967b085d2",
+              "merged_ent:c8167aaab0bca37b01589026be3be9b813fbbff6"
+            ]
+          },
+          {
+            "alias": "ваниар",
+            "entity_ids": [
+              "merged_ent:c7752b842b0fb7c4f6675584ede8968490d37871",
+              "merged_ent:cd9a32d02c8a9afb069cde4edf8b19de08e9b756"
+            ]
+          },
+          {
+            "alias": "златовласки",
+            "entity_ids": [
+              "merged_ent:c7752b842b0fb7c4f6675584ede8968490d37871",
+              "merged_ent:cd9a32d02c8a9afb069cde4edf8b19de08e9b756"
+            ]
+          },
+          {
+            "alias": "нолдор",
+            "entity_ids": [
+              "merged_ent:21807d44c1fda830cd08e8d514c1674664875456",
+              "merged_ent:d436f2b6792f0efef0414bc226fa7905670d23be"
+            ]
+          },
+          {
+            "alias": "великая музыка",
+            "entity_ids": [
+              "merged_ent:782cfc43dcf667f6d12ee3c86ecbc6c05b105d40",
+              "merged_ent:f47be80755b968994965d9c46d06746e8d3220c9"
+            ]
+          },
+          {
+            "alias": "рамалоки",
+            "entity_ids": [
+              "merged_ent:aca990038cb42a50bfd7e838342d0ffad8341290",
+              "merged_ent:d87bd6715b90630d145737bb1d4123619a5ae07c"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

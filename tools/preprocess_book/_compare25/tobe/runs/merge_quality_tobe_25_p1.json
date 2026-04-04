@@ -1,0 +1,77 @@
+{
+  "passed": true,
+  "violations": [],
+  "warnings": [
+    "aenarion_not_disambiguated_in_baseline:Аэнарион Защитник/Аэнарион"
+  ],
+  "checks": [
+    {
+      "check": "identity_group",
+      "details": [
+        {
+          "name": "Малекит",
+          "canonical": "Малекит"
+        },
+        {
+          "name": "Феанаро",
+          "canonical": "Малекит"
+        },
+        {
+          "name": "Куруфинвэ Феанаро",
+          "canonical": "Малекит"
+        }
+      ]
+    },
+    {
+      "check": "aenarion_disambiguation",
+      "pair": [
+        "Аэнарион Защитник",
+        "Аэнарион"
+      ],
+      "current": [
+        "Аэнарион Защитник",
+        "Аэнарион Защитник"
+      ],
+      "baseline": [
+        "Аэнарион Защитник",
+        "Аэнарион Защитник"
+      ]
+    },
+    {
+      "check": "relation_drop",
+      "pair": [
+        "Малекит",
+        "Нерданэль"
+      ],
+      "baseline_count": 11,
+      "current_count": 13
+    },
+    {
+      "check": "relation_drop",
+      "pair": [
+        "Феанаро",
+        "Нерданэль"
+      ],
+      "baseline_count": 11,
+      "current_count": 13
+    },
+    {
+      "check": "relation_drop",
+      "pair": [
+        "Малекит",
+        "Финвэ"
+      ],
+      "baseline_count": 10,
+      "current_count": 17
+    },
+    {
+      "check": "relation_drop",
+      "pair": [
+        "Феанаро",
+        "Финвэ"
+      ],
+      "baseline_count": 10,
+      "current_count": 17
+    }
+  ]
+}

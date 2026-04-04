@@ -178,6 +178,28 @@ def main():
         default=0,
         help="Ограничить количество обрабатываемых глав (0 = все)",
     )
+    parser.add_argument(
+        "--export-snapshot",
+        action="store_true",
+        help="Экспортировать snapshot jsonl (chapters/chunks/entities/relations/index)",
+    )
+    parser.add_argument(
+        "--snapshot-output-dir",
+        type=str,
+        default=None,
+        help="Директория для snapshot-файлов (по умолчанию tools/preprocess_book/_snapshot)",
+    )
+    parser.add_argument(
+        "--snapshot-max-files",
+        type=int,
+        default=0,
+        help="Ограничение числа файлов для snapshot (0 = все обработанные главы)",
+    )
+    parser.add_argument(
+        "--snapshot-validate",
+        action="store_true",
+        help="Запустить валидацию snapshot и сохранить validation_report.json",
+    )
 
     args = parser.parse_args()
 
@@ -433,6 +455,47 @@ def main():
                     f"Ошибка при загрузке в векторное хранилище: {e}", exc_info=True
                 )
                 # Не прерываем выполнение, только логируем ошибку
+
+        # Этап 5: Snapshot export (опционально)
+        if args.export_snapshot:
+            try:
+                from tools.preprocess_book.snapshot import export_snapshot, validate_snapshot
+
+                snapshot_output_dir = (
+                    Path(args.snapshot_output_dir)
+                    if args.snapshot_output_dir
+                    else Path("tools/preprocess_book/_snapshot")
+                )
+                snapshot_max_files = args.snapshot_max_files
+                if snapshot_max_files <= 0 and chapter_limit:
+                    snapshot_max_files = chapter_limit
+
+                logger.info("Этап 5: Экспорт snapshot в %s...", snapshot_output_dir)
+                export_stats = export_snapshot(
+                    output_dir=snapshot_output_dir,
+                    book_path=book_path,
+                    max_files=snapshot_max_files,
+                    results_dir=Path("tools/preprocess_book/results"),
+                    graph_nodes_dir=Path("tools/preprocess_book/graph_nodes"),
+                    graph_relations_dir=Path("tools/preprocess_book/graph_relations"),
+                    merged_graph_path=output_path,
+                )
+                logger.info("Snapshot export завершен: %s", export_stats)
+
+                if args.snapshot_validate:
+                    validation = validate_snapshot(snapshot_output_dir)
+                    validation_path = snapshot_output_dir / "validation_report.json"
+                    validation_path.write_text(
+                        json.dumps(validation, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "Snapshot validation status=%s report=%s",
+                        validation.get("status"),
+                        validation_path,
+                    )
+            except Exception as e:
+                logger.error("Ошибка при snapshot export: %s", e, exc_info=True)
 
     except Exception as e:
         logger.error(f"Критическая ошибка: {e}", exc_info=True)
