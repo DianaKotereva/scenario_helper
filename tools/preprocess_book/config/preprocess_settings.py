@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
 # Базовые пути
 BASE_DIR = Path(__file__).parent.parent.parent.parent
 TOOLS_DIR = BASE_DIR / "tools"
@@ -43,6 +50,10 @@ EXTRACTION_CHAPTER_BATCH_SIZE = int(os.getenv("EXTRACTION_CHAPTER_BATCH_SIZE", "
 EXTRACTION_VALIDATION_RETRY_COUNT = int(
     os.getenv("EXTRACTION_VALIDATION_RETRY_COUNT", "3")
 )
+EXTRACTION_WRITE_PER_SOURCE_PKL = _env_bool(
+    "EXTRACTION_WRITE_PER_SOURCE_PKL",
+    default=False,
+)
 
 # Настройки для vectorstore
 VECTORSTORE_CHUNK_SIZE = int(os.getenv("VECTORSTORE_CHUNK_SIZE", 512))
@@ -61,9 +72,6 @@ CHAPTERS_PICKLE_PATH = Path(
 PARALLEL_CONCURRENCY = int(
     os.getenv("PARALLEL_CONCURRENCY", "200")
 )  # Количество одновременных запросов к LLM
-GRAPH_BUILD_CONCURRENCY = int(
-    os.getenv("GRAPH_BUILD_CONCURRENCY", "200")
-)  # Количество параллельно обрабатываемых файлов графа
 
 # Создание директорий если они не существуют
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
