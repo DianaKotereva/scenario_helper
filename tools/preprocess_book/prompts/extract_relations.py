@@ -6,24 +6,36 @@ from typing import Any, Dict, List, Optional, Sequence
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from src.llm_core.llm_prompt_base import LLMBase
-from tools.preprocess_book.prompts.extract_names import ExtractedRelation
+from tools.preprocess_book.prompts.extract_names import EvidenceItem, ExtractedRelation
 
 system_prompt = """Ты профессиональный аналитик художественного текста.
-Твоя задача: извлечь только relations между уже найденными nodes.
+Твоя задача: извлечь ТОЛЬКО relations по уже найденным сущностям.
 
+### Входные данные:
+- Текст - отрывок главы книги или несколько глав с разметкой [CHAPTER source_id=... chapter_id=...].
+- Список нод - список нод, которые уже извлечены из текста. Твоя задача - описания связи между этими нодами.
+
+### Твоя задача:
+1. Извлеки отношения как ребра графа:
+- source/target_node_id: СТРОГО main_name связанных сущностей
+- type: глагол действия в формате "СОВЕРШАЕТ_ДЕЙСТВИЕ" (на русском)
+- descriptions: полный контекст взаимодействия в виде СПИСКА объектов:
+    {{"source_id": int, "chapter_id": int, "description": str}}
+- Учитывай как прямые, так и косвенные связи через события
+
+### Правила обработки:
 Важно:
-- Работай строго на русском языке.
-- Не добавляй новые сущности, используй только known_nodes из входа.
-- Если связь не подтверждается текстом, не добавляй её.
-
-Для каждой связи верни:
-- source_node_id: main_name из known_nodes
-- source_node_type: тип source-сущности
-- target_node_id: main_name из known_nodes
-- target_node_type: тип target-сущности
-- type: название отношения
-- descriptions: список объектов вида
-  {"source_id": int, "chapter_id": int, "description": str}
+1. Работай строго на русском языке.
+2. Не добавляй новые узлы/сущности — используй только список known_nodes из входа.
+3. Если связь не подтверждается текстом — не добавляй ее.
+4. source_node_id и target_node_id должны быть main_name из known_nodes.
+5. Если ты указываешь какого-то персонажа в relations у другого, проверь, что для него есть нода. 
+6. Наиболее подробно распиши взаимосвязи между сущностями, напиши максимально подробные отношения между ними - наиболее подробные relations
+7. Для конфликтов и трансформаций создавай отдельные связи с разными type
+8. descriptions заполняй списком объектов:
+   {"source_id": int, "chapter_id": int, "description": str}
+9. Разрешены только осмысленные связи между разными сущностями.
+10. Не выдумывай информацию, которой нет
 
 Формат ответа:
 {
