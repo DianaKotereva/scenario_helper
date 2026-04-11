@@ -5,9 +5,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field, validator
-
 from src.llm_core.llm_prompt_base import LLMBase
-
 
 CLASS_CHARACTER = "персонаж"
 CLASS_PLACE = "место"
@@ -34,19 +32,13 @@ system_prompt = f"""Ты профессиональный анализатор �
      {{"source_id": int, "chapter_id": int, "description": str}}
    - classification: строго один из ['{CLASS_CHARACTER}', '{CLASS_PLACE}', '{CLASS_ORG}', '{CLASS_TERM}', '{CLASS_FORCE}']
 
-2. Установи связи между узлами:
-   - source/target_node_id: СТРОГО main_name связанных сущностей
-   - type: глагол действия в формате "СОВЕРШАЕТ_ДЕЙСТВИЕ" (на русском)
-   - descriptions: полный контекст взаимодействия в виде СПИСКА объектов:
-     {{"source_id": int, "chapter_id": int, "description": str}}
-   - Учитывай как прямые, так и косвенные связи через события
+2. Сделай небольшую суммаризацию текста не более 1-2 абзацев.
 
-3. Сделай небольшую суммаризацию текста не более 1-2 абзацев.
-
-4. Приоритеты:
+3. Приоритеты:
    - Сохраняй максимальный контекст
-   - Избегай генерации новых фактов
-   - Для конфликтов и трансформаций создавай отдельные связи с разными type
+   - Напиши как можно больше смысловых нод, не пропускай информацию. Ты должен создать максимально полный граф, по максимуму упомянуть все смысловые важные сущности, которые встречаются в тексте. Не теряй информацию.
+   - Используй ТОЛЬКО смысловые ноды. Не указывай общеупотребимые ноды (к примеру, сущность камин может быть упомянута, только если это какой-то особенный камин). При этом все именные сущности, все персонажи, значимые места, важные элементы сюжета должны быть упомянуты и описаны.
+   - Не выдумывай информацию, которой нет
 
 ### Выходной формат:
 {{
@@ -62,22 +54,6 @@ system_prompt = f"""Ты профессиональный анализатор �
         }}
       ],
       "classification": str
-    }}
-  ],
-  "relations": [
-    {{
-      "source_node_id": str,
-      "source_node_type": str,
-      "target_node_id": str,
-      "target_node_type": str,
-      "type": str,
-      "descriptions": [
-        {{
-          "source_id": int,
-          "chapter_id": int,
-          "description": str
-        }}
-      ]
     }}
   ],
   "summarization": str
@@ -183,7 +159,9 @@ class ExtractNames(LLMBase):
         chapter_blocks: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         source_ids = self._to_source_ids(source_id)
-        text_payload = self._render_chapter_blocks(chapter_blocks) if chapter_blocks else text
+        text_payload = (
+            self._render_chapter_blocks(chapter_blocks) if chapter_blocks else text
+        )
 
         if source_ids:
             user_prompt = f"source_ids: {source_ids}\\nТекст: {text_payload}"

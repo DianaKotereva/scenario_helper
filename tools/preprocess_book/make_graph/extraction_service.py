@@ -11,6 +11,7 @@ from tools.preprocess_book.config.preprocess_settings import (
     BATCH_SIZE,
     EXTRACTION_CHAPTER_BATCH_SIZE,
     EXTRACTION_VALIDATION_RETRY_COUNT,
+    EXTRACTION_WRITE_PER_SOURCE_PKL,
     PARALLEL_CONCURRENCY,
     RESULTS_DIR,
 )
@@ -29,7 +30,7 @@ class ExtractionService:
 
     def __init__(self, extractor, extractor_relations=None):
         self.extractor = extractor
-        self.extractor_relations = extractor_relations or extractor
+        self.extractor_relations = extractor_relations
 
     @staticmethod
     def _first_source_id(source_id: Any) -> Optional[int]:
@@ -42,6 +43,10 @@ class ExtractionService:
         return None
 
     def _as_dict(self, result: Any) -> Optional[Dict[str, Any]]:
+        return self._as_dict_with(self.extractor, result)
+
+    @staticmethod
+    def _as_dict_with(extractor: Any, result: Any) -> Optional[Dict[str, Any]]:
         if isinstance(result, dict):
             return dict(result)
 
@@ -65,7 +70,7 @@ class ExtractionService:
 
         if raw_text:
             try:
-                parsed = self.extractor.parse_json_content(raw_text)
+                parsed = extractor.parse_json_content(raw_text)
                 if isinstance(parsed, dict):
                     return parsed
             except Exception:
@@ -505,7 +510,7 @@ class ExtractionService:
         self,
         batch_idx: int,
         source_ids: Sequence[int],
-        llm_input: Dict[str, Any],
+        chapter_blocks: Sequence[Dict[str, Any]],
         initial_result: Any,
     ) -> Dict[str, Any]:
         retry_limit = max(0, int(EXTRACTION_VALIDATION_RETRY_COUNT or 0))
@@ -513,7 +518,16 @@ class ExtractionService:
 
         for attempt in range(retry_limit + 1):
             try:
-                return self._normalize_result(current_result, tuple(source_ids))
+                normalized = self._normalize_result(current_result, tuple(source_ids))
+                missing_sources = self._find_missing_source_ids_in_payload(
+                    payload=normalized,
+                    expected_source_ids=source_ids,
+                )
+                if missing_sources:
+                    raise ValueError(
+                        f"Extraction source coverage missing for source_ids={missing_sources}"
+                    )
+                return normalized
             except Exception as ex:
                 if attempt >= retry_limit:
                     logger.warning(
@@ -539,7 +553,10 @@ class ExtractionService:
                     ex,
                 )
                 try:
-                    current_result = await self._invoke_raw_llm(llm_input)
+                    current_result = await self._invoke_extraction_for_batch(
+                        source_ids=source_ids,
+                        chapter_blocks=chapter_blocks,
+                    )
                 except Exception as retry_ex:
                     logger.warning(
                         "LLM retry call failed for batch=%s source_ids=%s: %s",
@@ -551,6 +568,40 @@ class ExtractionService:
 
         return self._empty_payload()
 
+    @staticmethod
+    def _find_missing_source_ids_in_payload(
+        payload: Dict[str, Any],
+        expected_source_ids: Sequence[int],
+    ) -> List[int]:
+        present: set[int] = set()
+
+        nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            actions = node.get("actions") if isinstance(node.get("actions"), list) else []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                sid = action.get("source_id")
+                if isinstance(sid, int):
+                    present.add(int(sid))
+
+        relations = payload.get("relations") if isinstance(payload.get("relations"), list) else []
+        for rel in relations:
+            if not isinstance(rel, dict):
+                continue
+            descriptions = rel.get("descriptions") if isinstance(rel.get("descriptions"), list) else []
+            for desc in descriptions:
+                if not isinstance(desc, dict):
+                    continue
+                sid = desc.get("source_id")
+                if isinstance(sid, int):
+                    present.add(int(sid))
+
+        expected = {int(v) for v in expected_source_ids if isinstance(v, int)}
+        return sorted(expected - present)
+
     async def _invoke_raw_llm(self, llm_input: Dict[str, Any]) -> Any:
         """
         Invoke LLM without parser to avoid silent parser drops in batch mode.
@@ -560,21 +611,87 @@ class ExtractionService:
         raw = await chain.ainvoke(llm_input)
         return self.extractor._process_output(raw)
 
+    async def _invoke_raw_llm_with(self, extractor: Any, llm_input: Dict[str, Any]) -> Any:
+        chain = extractor.prompt_template | extractor.llm
+        raw = await chain.ainvoke(llm_input)
+        return extractor._process_output(raw)
+
+    async def _invoke_extraction_for_batch(
+        self,
+        source_ids: Sequence[int],
+        chapter_blocks: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        source_tuple = tuple(int(sid) for sid in source_ids)
+
+        node_input = self.extractor.make_user_prompt(
+            text="",
+            source_id=source_tuple,
+            chapter_blocks=chapter_blocks,
+        )
+        nodes_raw = await self._invoke_raw_llm_with(self.extractor, node_input)
+        nodes_payload = self._as_dict_with(self.extractor, nodes_raw)
+        if nodes_payload is None:
+            raise ValueError("nodes extraction returned non-json payload")
+
+        # Backward-compatible fallback: old one-stage setup.
+        if self.extractor_relations is None:
+            return nodes_payload
+
+        known_nodes = nodes_payload.get("nodes")
+        if not isinstance(known_nodes, list):
+            known_nodes = []
+
+        rel_input = self.extractor_relations.make_user_prompt(
+            text="",
+            known_nodes=known_nodes,
+            source_id=source_tuple,
+            chapter_blocks=chapter_blocks,
+        )
+        try:
+            relations_raw = await self._invoke_raw_llm_with(
+                self.extractor_relations,
+                rel_input,
+            )
+            relations_payload = (
+                self._as_dict_with(self.extractor_relations, relations_raw) or {}
+            )
+            relations = (
+                relations_payload.get("relations")
+                if isinstance(relations_payload.get("relations"), list)
+                else []
+            )
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                "Relations extraction failed for source_ids=%s; using empty relations: %s",
+                source_tuple,
+                ex,
+            )
+            relations = []
+
+        return {
+            "nodes": nodes_payload.get("nodes", []),
+            "relations": relations,
+            "summarization": str(nodes_payload.get("summarization", "") or ""),
+        }
+
     async def _invoke_raw_batch(
         self,
-        inputs: List[Dict[str, Any]],
+        groups_meta: List[Dict[str, Any]],
         concurrency: int,
     ) -> List[Any]:
         semaphore = asyncio.Semaphore(max(1, int(concurrency or 1)))
 
-        async def _one(inp: Dict[str, Any]) -> Any:
+        async def _one(group: Dict[str, Any]) -> Any:
             async with semaphore:
                 try:
-                    return await self._invoke_raw_llm(inp)
+                    return await self._invoke_extraction_for_batch(
+                        source_ids=group["source_ids"],
+                        chapter_blocks=group["chapter_blocks"],
+                    )
                 except Exception as ex:  # noqa: BLE001
                     return ex
 
-        tasks = [_one(inp) for inp in inputs]
+        tasks = [_one(group) for group in groups_meta]
         return await asyncio.gather(*tasks)
 
     def _normalize_result(self, result: Any, source_id: Any) -> Dict[str, Any]:
@@ -699,7 +816,6 @@ class ExtractionService:
         texts: List[Document],
         concurrency: int = 5,
     ) -> List[str]:
-        inputs: List[Dict[str, Any]] = []
         groups_meta: List[Dict[str, Any]] = []
         all_summarizations: List[str] = ["" for _ in texts]
 
@@ -735,27 +851,21 @@ class ExtractionService:
                 }
                 for entry in batch_entries
             ]
-            inputs.append(
-                self.extractor.make_user_prompt(
-                    text="",
-                    source_id=source_tuple,
-                    chapter_blocks=chapter_blocks,
-                )
-            )
             groups_meta.append(
                 {
                     "source_ids": source_tuple,
                     "indices": [entry["index"] for entry in batch_entries],
+                    "chapter_blocks": chapter_blocks,
                 }
             )
 
         logger.info(
             "Starting extraction for %s chapter-batches (batch_size=%s) with concurrency=%s",
-            len(inputs),
+            len(groups_meta),
             chapter_batch_size,
             concurrency,
         )
-        results = await self._invoke_raw_batch(inputs, concurrency=concurrency)
+        results = await self._invoke_raw_batch(groups_meta, concurrency=concurrency)
 
         for group_idx, (raw_result, meta) in enumerate(zip(results, groups_meta)):
             source_tuple = meta["source_ids"]
@@ -768,7 +878,7 @@ class ExtractionService:
                 normalized = await self._retry_normalize_batch_result(
                     batch_idx=group_idx,
                     source_ids=source_tuple,
-                    llm_input=inputs[group_idx],
+                    chapter_blocks=meta["chapter_blocks"],
                     initial_result=raw_result,
                 )
                 summary_text = normalized.get("summarization", "")
@@ -783,15 +893,19 @@ class ExtractionService:
                     encoding="utf-8",
                 )
 
-                for sid in source_tuple:
-                    source_filename = FileManager.get_source_filename((sid,))
-                    sliced_payload = self._slice_payload_by_source_id(normalized, sid)
-                    FileManager.save_pickle(sliced_payload, RESULTS_DIR / f"{source_filename}.pkl")
-                    if sid % 5 == 0:
-                        logger.info(
-                            "Extraction progress marker: chapter source_id=%s",
-                            sid,
+                if EXTRACTION_WRITE_PER_SOURCE_PKL:
+                    for sid in source_tuple:
+                        source_filename = FileManager.get_source_filename((sid,))
+                        sliced_payload = self._slice_payload_by_source_id(normalized, sid)
+                        FileManager.save_pickle(
+                            sliced_payload,
+                            RESULTS_DIR / f"{source_filename}.pkl",
                         )
+                        if sid % 5 == 0:
+                            logger.info(
+                                "Extraction progress marker: chapter source_id=%s",
+                                sid,
+                            )
 
                 for text_idx in meta["indices"]:
                     if 0 <= text_idx < len(all_summarizations):
