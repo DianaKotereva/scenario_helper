@@ -131,6 +131,32 @@ class ChapterIndexer:
         else:
             kwargs["cert_verify"] = False
             kwargs["use_ssl"] = False
+
+        # Raise request timeout for heavy index create/bulk operations.
+        timeout_raw = (
+            os.getenv("OPENSEARCH_TIMEOUT", "").strip()
+            or os.getenv("ES_TIMEOUT", "").strip()
+            or "60"
+        )
+        if timeout_raw.lower() not in {"", "none", "null", "off", "false", "0"}:
+            kwargs["timeout"] = int(timeout_raw)
+
+        kwargs["max_retries"] = int(
+            os.getenv("OPENSEARCH_MAX_RETRIES", "").strip()
+            or os.getenv("ES_MAX_RETRIES", "").strip()
+            or "5"
+        )
+        retry_on_timeout_raw = (
+            os.getenv("OPENSEARCH_RETRY_ON_TIMEOUT", "").strip()
+            or os.getenv("ES_RETRY_ON_TIMEOUT", "").strip()
+            or "true"
+        )
+        kwargs["retry_on_timeout"] = retry_on_timeout_raw.lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         
         # Создаем клиент
         self._client = OpenSearch(

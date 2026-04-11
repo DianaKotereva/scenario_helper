@@ -26,6 +26,77 @@ class RelationProcessor:
             return ""
         return desc
 
+    @staticmethod
+    def _name_match(a: str, b: str) -> bool:
+        a_l = (a or "").strip().lower()
+        b_l = (b or "").strip().lower()
+        if not a_l or not b_l:
+            return False
+        return a_l in b_l or b_l in a_l
+
+    @staticmethod
+    def _node_source_ids(node_obj) -> set[int]:
+        source_ids: set[int] = set()
+        for action in getattr(node_obj, "actions", []) or []:
+            sid = getattr(action, "source_id", None)
+            if isinstance(sid, int):
+                source_ids.add(int(sid))
+            elif isinstance(sid, tuple):
+                source_ids.update(int(v) for v in sid if isinstance(v, int))
+            elif isinstance(sid, list):
+                source_ids.update(int(v) for v in sid if isinstance(v, int))
+        return source_ids
+
+    @classmethod
+    def _canonicalize_node_id(
+        cls,
+        node_id: Any,
+        all_book_nodes: AllBookNodes,
+        source_id: Tuple[int, ...],
+    ) -> str:
+        raw_name = str(node_id or "").strip()
+        if not raw_name:
+            return ""
+
+        # Primary canonicalization path via alias index.
+        mapped = all_book_nodes.names_list.get(raw_name)
+        mapped_key = mapped if isinstance(mapped, str) and mapped in all_book_nodes.nodes else ""
+
+        # Fallback: fuzzy candidate search in nodes.
+        candidates: List[str] = []
+        for key, node_obj in all_book_nodes.nodes.items():
+            names = [getattr(node_obj, "main_name", "")] + list(getattr(node_obj, "alt_names", []) or [])
+            if any(cls._name_match(raw_name, n) for n in names):
+                candidates.append(key)
+
+        requested_sources = {int(v) for v in source_id if isinstance(v, int)}
+        if mapped_key and (not requested_sources):
+            return mapped_key
+
+        if mapped_key:
+            mapped_overlap = len(cls._node_source_ids(all_book_nodes.nodes[mapped_key]).intersection(requested_sources))
+            # Keep alias mapping when source context does not contradict it.
+            if mapped_overlap > 0:
+                return mapped_key
+
+        if not candidates:
+            return mapped_key
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if mapped_key and mapped_key not in candidates:
+            candidates.append(mapped_key)
+
+        def _score(node_key: str) -> tuple[int, int, int]:
+            node_obj = all_book_nodes.nodes[node_key]
+            node_sources = cls._node_source_ids(node_obj)
+            overlap = len(node_sources.intersection(requested_sources))
+            exact_main = int(raw_name.lower() == str(getattr(node_obj, "main_name", "")).lower())
+            exact_alt = int(raw_name.lower() in {str(v).lower() for v in (getattr(node_obj, "alt_names", []) or [])})
+            return overlap, exact_main, exact_alt
+
+        return max(candidates, key=_score)
+
     @classmethod
     def _extract_descriptions(
         cls,
@@ -93,21 +164,28 @@ class RelationProcessor:
         rel_graphs: AllBooksEdges,
         source_id: Tuple[int, ...],
     ) -> AllBooksEdges:
-        all_mains = list(all_book_nodes.nodes.keys())
         rel_inputs = [item for item in rel_inputs if item]
-        rel_inputs = [
-            item
-            for item in rel_inputs
-            if item.get("source_node_id") in all_mains and item.get("target_node_id") in all_mains
-        ]
 
         for rel in rel_inputs:
             try:
-                source_node_id = rel.get("source_node_id")
-                target_node_id = rel.get("target_node_id")
+                source_node_id = cls._canonicalize_node_id(
+                    rel.get("source_node_id"),
+                    all_book_nodes=all_book_nodes,
+                    source_id=source_id,
+                )
+                target_node_id = cls._canonicalize_node_id(
+                    rel.get("target_node_id"),
+                    all_book_nodes=all_book_nodes,
+                    source_id=source_id,
+                )
 
                 if not source_node_id or not target_node_id:
-                    logger.warning("Relation skipped due empty node ids: %s", rel)
+                    logger.warning(
+                        "Relation skipped due unresolved node ids: source=%s target=%s raw=%s",
+                        rel.get("source_node_id"),
+                        rel.get("target_node_id"),
+                        rel,
+                    )
                     continue
 
                 pair = tuple(sorted([source_node_id, target_node_id]))

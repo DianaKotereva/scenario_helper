@@ -1,467 +1,355 @@
 """
-Узлы графа агента для обработки вопросов пользователя.
-
-Модуль содержит функции-узлы для LangGraph workflow:
-- reasoning_node: Анализ контекста и определение следующего шага
-- search_node: Поиск информации по сгенерированным вопросам
-- final_answer_node: Формирование финального ответа
-- cond_edge_reasoner: Условное ветвление на основе решения reasoning_node
+Agent graph nodes for ReAct-style orchestration.
 """
 
 import logging
 from copy import deepcopy
-import re
+from typing import Any, Dict, Iterable, List
 
 import src.config.settings as settings
 from src.agent.agent_graph.constants import AgentDefaults, NextStep
 from src.agent.agent_graph.states.agent_state import AgentState
-from src.agent.prompts import (
-    answer_agent,
-    questions_agent,
-    reasoning_agent,
-    retrieve_agent,
-)
+from src.agent.prompts import answer_agent, retrieve_agent
 
 logger = logging.getLogger(__name__)
 
-# Значения по умолчанию для состояния агента
-default_values = [
-    ("max_n_iterations", settings.MAX_N_ITERATIONS),
-    ("n_iteration", AgentDefaults.N_ITERATION),
-    ("user_question", AgentDefaults.USER_QUESTION),
-    ("thoughts", AgentDefaults.THOUGHTS),
-    ("context", AgentDefaults.CONTEXT),
-    ("questions", AgentDefaults.QUESTIONS),
-    ("final_answer", AgentDefaults.FINAL_ANSWER),
-    ("stop", AgentDefaults.STOP),
-    ("retrieval_trace", []),
-]
+
+def _merge_unique_ints(existing: Iterable[int], new_values: Iterable[int]) -> List[int]:
+    out = {int(v) for v in existing if isinstance(v, int)}
+    out.update(int(v) for v in new_values if isinstance(v, int))
+    return sorted(out)
+
+
+def _merge_unique_strs(existing: Iterable[str], new_values: Iterable[str]) -> List[str]:
+    out = {str(v) for v in existing if isinstance(v, str) and str(v).strip()}
+    out.update(str(v) for v in new_values if isinstance(v, str) and str(v).strip())
+    return sorted(out)
 
 
 def _initialize_default_values(state: AgentState) -> AgentState:
-    """
-    Инициализирует значения по умолчанию для состояния агента.
+    defaults: Dict[str, Any] = {
+        "max_n_iterations": settings.MAX_N_ITERATIONS,
+        "n_iteration": AgentDefaults.N_ITERATION,
+        "user_question": AgentDefaults.USER_QUESTION,
+        "thoughts": deepcopy(AgentDefaults.THOUGHTS),
+        "context": deepcopy(AgentDefaults.CONTEXT),
+        "questions": deepcopy(AgentDefaults.QUESTIONS),
+        "final_answer": AgentDefaults.FINAL_ANSWER,
+        "stop": AgentDefaults.STOP,
+        "retrieval_trace": [],
+        "plan": [],
+        "pending_tool_call": {},
+        "tool_calls": [],
+        "observations": [],
+        "hints": {
+            "chapter_ids": [],
+            "source_ids": [],
+            "entity_ids": [],
+            "entity_name_tokens": [],
+            "entity_names": [],
+        },
+        "evidence": [],
+        "react_iteration": 0,
+        "react_max_iterations": int(getattr(settings, "MAX_N_ITERATIONS", 2)) + 2,
+        "route_reason": "",
+        "final_ready": False,
+        "last_tool_name": None,
+        "next_step": NextStep.SEARCH.value,
+    }
 
-    Args:
-        state: Текущее состояние агента
-
-    Returns:
-        Состояние с инициализированными значениями по умолчанию
-    """
-    for key, value in deepcopy(default_values):
+    for key, value in defaults.items():
         if key not in state:
-            state[key] = deepcopy(value) if isinstance(value, list) else value
+            state[key] = deepcopy(value) if isinstance(value, (dict, list)) else value
     return state
 
 
 def _validate_state(state: AgentState) -> None:
-    """
-    Валидирует состояние агента.
-
-    Args:
-        state: Состояние для валидации
-
-    Raises:
-        ValueError: Если состояние некорректно
-    """
-    if not state.get("user_question"):
+    question = str(state.get("user_question", "")).strip()
+    if not question:
         raise ValueError("user_question is required in state")
-
-    user_question = str(state["user_question"]).strip()
-    if not user_question:
-        raise ValueError("user_question is required in state")
-
-    # Fail fast for shell-encoding corruption like "??? ????? ????????"
-    if re.fullmatch(r"[\?\s]+", user_question):
-        raise ValueError(
-            "user_question looks encoding-corrupted. Pass question in UTF-8."
-        )
-
-    question_mark_ratio = user_question.count("?") / max(len(user_question), 1)
-    if question_mark_ratio > 0.35:
-        raise ValueError(
-            "user_question looks encoding-corrupted. Pass question in UTF-8."
-        )
-
-    state["user_question"] = user_question
-
-    if "n_iteration" in state and state["n_iteration"] < 0:
-        raise ValueError("n_iteration must be non-negative")
-
-    if "max_n_iterations" in state and state["max_n_iterations"] < 1:
-        raise ValueError("max_n_iterations must be at least 1")
+    state["user_question"] = question
 
 
-def reasoning_node(state: AgentState) -> AgentState:
-    """
-    Узел рассуждения, анализирующий контекст и определяющий следующий шаг.
+def planner_node(state: AgentState) -> AgentState:
+    state = _initialize_default_values(state)
+    _validate_state(state)
 
-    Анализирует собранный контекст и принимает решение о необходимости
-    дополнительного поиска информации или формировании финального ответа.
+    state["plan"] = [
+        "semantic_search",
+        "deterministic_entity_search",
+        "deterministic_graph_expand",
+        "chapter_lookup_if_needed",
+        "final_answer",
+    ]
 
-    Args:
-        state: Текущее состояние агента
+    if not state.get("tool_calls"):
+        state["pending_tool_call"] = {
+            "tool_name": "semantic_search",
+            "input": {
+                "query": state["user_question"],
+                "hints": state.get("hints", {}),
+                "k": settings.PHASE_A_RECALL_K,
+            },
+        }
+        state["route_reason"] = "bootstrap React plan with semantic_search"
+    return state
 
-    Returns:
-        Обновленное состояние агента с решением о следующем шаге
 
-    Raises:
-        ValueError: Если состояние некорректно
-        RuntimeError: Если вызов LLM не удался
-    """
-    try:
-        # Инициализация значений по умолчанию
-        state = _initialize_default_values(state)
+def _prepare_next_tool_call(state: AgentState) -> None:
+    if state.get("final_ready"):
+        state["pending_tool_call"] = {}
+        state["route_reason"] = "final_ready already set"
+        return
 
-        # Валидация состояния
-        _validate_state(state)
+    if state.get("react_iteration", 0) >= state.get("react_max_iterations", 4):
+        state["final_ready"] = True
+        state["pending_tool_call"] = {}
+        state["route_reason"] = "react iteration limit reached"
+        return
 
-        # Если есть контекст, анализируем его
-        if state.get("context"):
-            try:
-                result = reasoning_agent.invoke(
-                    user_question=state["user_question"],
-                    context=state.get("context", []),
-                )
+    last_tool = state.get("last_tool_name")
+    hints = state.get("hints", {}) or {}
 
-                # Обработка результата с Pydantic валидацией
-                from src.agent.prompts.output_models import ReasoningOutput
-
-                # Если результат уже является Pydantic моделью (после парсинга)
-                if isinstance(result, ReasoningOutput):
-                    reasoning_output = result
-                elif isinstance(result, dict):
-                    # Пытаемся создать модель из словаря (валидация)
-                    try:
-                        reasoning_output = ReasoningOutput(**result)
-                    except Exception as validation_error:
-                        logger.error(
-                            f"Validation error in reasoning output: {validation_error}",
-                            exc_info=True,
-                        )
-                        # Fallback на значения по умолчанию
-                        state["next_step"] = NextStep.SEARCH.value
-                        state["to_collect"] = "Ошибка валидации результата рассуждений"
-                        state["n_iteration"] = state.get("n_iteration", 0) + 1
-                        return state
-                else:
-                    logger.warning(
-                        f"Reasoning agent returned unexpected type: {type(result)}"
-                    )
-                    state["next_step"] = NextStep.SEARCH.value
-                    state["n_iteration"] = state.get("n_iteration", 0) + 1
-                    return state
-
-                # Используем валидированные значения из Pydantic модели
-                state["thoughts"].append(reasoning_output.reasoning)
-                state["to_collect"] = reasoning_output.to_collect
-                next_step_value = reasoning_output.next_step
-                if hasattr(next_step_value, "value"):
-                    next_step_value = next_step_value.value
-                state["next_step"] = str(next_step_value)
-
-                logger.debug(
-                    f"Reasoning result validated: next_step={reasoning_output.next_step}, "
-                    f"reasoning_length={len(reasoning_output.reasoning)}"
-                )
-
-            except Exception as e:
-                logger.error(f"Error in reasoning_agent.invoke: {e}", exc_info=True)
-                state["next_step"] = NextStep.SEARCH.value
-                state["to_collect"] = "Ошибка при анализе контекста"
+    if not state.get("tool_calls"):
+        tool_name = "semantic_search"
+        tool_input = {
+            "query": state["user_question"],
+            "hints": hints,
+            "k": settings.PHASE_A_RECALL_K,
+        }
+        reason = "no tool calls yet"
+    elif last_tool == "semantic_search":
+        tool_name = "deterministic_entity_search"
+        tool_input = {
+            "query": state["user_question"],
+            "hints": hints,
+            "top_k": settings.PHASE_B_MAX_ENTITIES,
+        }
+        reason = "semantic hints collected"
+    elif last_tool == "deterministic_entity_search":
+        tool_name = "deterministic_graph_expand"
+        tool_input = {
+            "query": state["user_question"],
+            "hints": hints,
+            "depth": 1,
+            "limits": {
+                "max_entities": settings.PHASE_B_MAX_ENTITIES,
+                "max_relations": settings.PHASE_B_MAX_RELATIONS,
+                "max_chapters": settings.PHASE_B_MAX_CHAPTERS,
+            },
+        }
+        reason = "entity candidates available"
+    elif last_tool == "deterministic_graph_expand":
+        chapter_ids = hints.get("chapter_ids", [])
+        used_chapter_lookup = any(tc.get("tool_name") == "chapter_lookup" for tc in state.get("tool_calls", []))
+        if chapter_ids and not used_chapter_lookup:
+            tool_name = "chapter_lookup"
+            tool_input = {
+                "chapter_ids": chapter_ids,
+                "max_chapters": settings.MAX_CHAPTERS_IN_CONTEXT,
+            }
+            reason = "need chapter grounding"
         else:
-            # Если контекста нет, переходим к поиску
-            state["next_step"] = NextStep.SEARCH.value
+            state["final_ready"] = True
+            state["pending_tool_call"] = {}
+            state["route_reason"] = "graph expansion complete"
+            return
+    elif last_tool == "chapter_lookup":
+        state["final_ready"] = True
+        state["pending_tool_call"] = {}
+        state["route_reason"] = "chapter grounding complete"
+        return
+    else:
+        state["final_ready"] = True
+        state["pending_tool_call"] = {}
+        state["route_reason"] = "unknown tool path; stop"
+        return
 
-        # Увеличиваем счетчик итераций
-        state["n_iteration"] = state.get("n_iteration", 0) + 1
+    state["pending_tool_call"] = {"tool_name": tool_name, "input": tool_input}
+    state["route_reason"] = reason
 
-        return state
 
-    except ValueError as e:
-        logger.error(f"Validation error in reasoning_node: {e}", exc_info=True)
+def tool_router_node(state: AgentState) -> AgentState:
+    state = _initialize_default_values(state)
+    _validate_state(state)
+
+    if not state.get("pending_tool_call"):
+        _prepare_next_tool_call(state)
+
+    if state.get("final_ready"):
         state["next_step"] = NextStep.ANSWER.value
-        state["stop"] = True
-        return state
-    except Exception as e:
-        logger.error(f"Unexpected error in reasoning_node: {e}", exc_info=True)
-        state["next_step"] = NextStep.ANSWER.value
-        state["stop"] = True
-        return state
+    else:
+        state["next_step"] = NextStep.SEARCH.value
+    return state
 
 
-def cond_edge_reasoner(state: AgentState) -> str:
-    """
-    Условное ветвление на основе решения reasoning_node.
-
-    Определяет, нужно ли продолжить поиск информации или перейти
-    к формированию финального ответа.
-
-    Args:
-        state: Текущее состояние агента
-
-    Returns:
-        Имя следующего узла: "search_node" или "final_answer_node"
-    """
-    try:
-        next_step = state.get("next_step", NextStep.SEARCH.value)
-        n_iteration = state.get("n_iteration", 0)
-        max_iterations = state.get("max_n_iterations", settings.MAX_N_ITERATIONS)
-        stop = state.get("stop", False)
-
-        # Проверяем условия для продолжения поиска
-        should_search = (
-            next_step == NextStep.SEARCH.value
-            and n_iteration <= max_iterations
-            and not stop
-        )
-
-        if should_search:
-            logger.debug(
-                f"Continuing search (iteration {n_iteration}/{max_iterations})"
-            )
-            return "search_node"
-        else:
-            logger.debug("Moving to final answer")
-            return "final_answer_node"
-
-    except Exception as e:
-        logger.error(f"Error in cond_edge_reasoner: {e}", exc_info=True)
+def cond_edge_tool_router(state: AgentState) -> str:
+    if state.get("final_ready"):
         return "final_answer_node"
+    pending = state.get("pending_tool_call") or {}
+    if pending.get("tool_name"):
+        return "tool_exec_node"
+    return "final_answer_node"
 
 
-def search_node(state: AgentState) -> AgentState:
-    """
-    Узел поиска информации по сгенерированным вопросам.
+def tool_exec_node(state: AgentState) -> AgentState:
+    state = _initialize_default_values(state)
+    _validate_state(state)
 
-    Генерирует вопросы для поиска (если нужно) и выполняет поиск
-    информации с помощью retrieve_agent.
+    pending = state.get("pending_tool_call") or {}
+    tool_name = pending.get("tool_name")
+    tool_input = pending.get("input") or {}
 
-    Args:
-        state: Текущее состояние агента
+    if not tool_name:
+        state["final_ready"] = True
+        state["route_reason"] = "empty pending tool call"
+        return state
 
-    Returns:
-        Обновленное состояние агента с найденной информацией
-
-    Raises:
-        RuntimeError: Если поиск не удался
-    """
     try:
-        # Валидация состояния
-        _validate_state(state)
+        result = retrieve_agent.run_tool(tool_name=tool_name, **tool_input)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Tool execution failed for %s: %s", tool_name, exc, exc_info=True)
+        result = {
+            "tool_name": tool_name,
+            "input": tool_input,
+            "selected_items": [],
+            "rejected_items": [{"reason": str(exc)}],
+            "hints": {},
+            "context": {},
+            "latency_ms": 0.0,
+            "error": str(exc),
+        }
 
-        # Определяем уже выполненные запросы
-        context = state.get("context", [])
-        done_queries = [
-            list(item.keys())[0] for item in context if isinstance(item, dict) and item
-        ]
+    state["_last_tool_result"] = result
+    state["last_tool_name"] = tool_name
+    state["react_iteration"] = int(state.get("react_iteration", 0)) + 1
+    state["pending_tool_call"] = {}
 
-        # Генерируем вопросы для поиска
-        user_question = state["user_question"]
+    state.setdefault("tool_calls", []).append(
+        {
+            "iteration": state["react_iteration"],
+            "tool_name": tool_name,
+            "input": tool_input,
+            "latency_ms": result.get("latency_ms", 0.0),
+            "route_reason": state.get("route_reason", ""),
+        }
+    )
+    return state
 
-        if user_question not in done_queries:
-            questions = [user_question]
-            logger.debug(f"Using original question: {user_question}")
-        else:
-            try:
-                result = questions_agent.invoke(
-                    user_question=user_question,
-                    reasoning=state.get("to_collect", ""),
-                    context=context,
-                )
 
-                # Обработка результата с Pydantic валидацией
-                from src.agent.prompts.output_models import QuestionGeneratorOutput
+def _append_context_from_tool(state: AgentState, tool_name: str, context: Dict[str, Any]) -> None:
+    chunks: List[str] = []
+    for key in ["nodes_texts", "rel_texts", "quote_texts", "sums_texts", "entities_text", "relations_text", "chapters_text"]:
+        value = context.get(key)
+        if isinstance(value, str) and value.strip():
+            chunks.append(f"[{tool_name}:{key}]\n{value.strip()}")
+    if not chunks:
+        return
+    state.setdefault("context", []).append({tool_name: "\n\n".join(chunks)})
 
-                # Если результат уже является Pydantic моделью
-                if isinstance(result, QuestionGeneratorOutput):
-                    questions_output = result
-                    questions = questions_output.questions
-                elif isinstance(result, dict):
-                    # Пытаемся создать модель из словаря (валидация)
-                    try:
-                        questions_output = QuestionGeneratorOutput(**result)
-                    except Exception as validation_error:
-                        logger.error(
-                            f"Validation error in questions output: {validation_error}",
-                            exc_info=True,
-                        )
-                        questions = []
-                    else:
-                        questions = questions_output.questions
-                else:
-                    logger.warning(
-                        f"Questions agent returned unexpected type: {type(result)}"
-                    )
-                    questions = []
 
-                logger.debug(f"Generated {len(questions)} validated questions")
+def observe_node(state: AgentState) -> AgentState:
+    state = _initialize_default_values(state)
 
-            except Exception as e:
-                logger.error(f"Error generating questions: {e}", exc_info=True)
-                questions = []
-
-        # Выполняем поиск по каждому вопросу
-        if questions:
-            for query in questions:
-                if not query or not isinstance(query, str):
-                    logger.warning(f"Invalid query: {query}, skipping")
-                    continue
-
-                logger.info(f"Searching for: {query}")
-
-                try:
-                    result = retrieve_agent.invoke(query=query)
-                    trace_payload = []
-                    if isinstance(result, dict):
-                        raw_trace = result.get("trace", [])
-                        if isinstance(raw_trace, list):
-                            trace_payload = raw_trace
-                    if trace_payload:
-                        state.setdefault("retrieval_trace", []).append(
-                            {"query": query, "phases": trace_payload}
-                        )
-
-                    # Обработка результата с Pydantic валидацией
-                    from src.agent.prompts.output_models import RetrieveOutput
-
-                    # Если результат уже является Pydantic моделью
-                    if isinstance(result, RetrieveOutput):
-                        retrieve_output = result
-                        answer = retrieve_output.answer
-                    elif isinstance(result, dict):
-                        # Пытаемся создать модель из словаря (валидация)
-                        try:
-                            retrieve_output = RetrieveOutput(**result)
-                            answer = retrieve_output.answer
-                        except Exception as validation_error:
-                            logger.error(
-                                f"Validation error in retrieve output for query '{query}': {validation_error}",
-                                exc_info=True,
-                            )
-                            # Fallback: используем значение из словаря, если есть
-                            answer = result.get("answer", "")
-                            if not answer or len(answer) < 20:
-                                logger.warning(
-                                    f"Invalid answer for query '{query}', skipping"
-                                )
-                                continue
-                    else:
-                        logger.warning(
-                            f"Retrieve agent returned unexpected type: {type(result)} for query: {query}"
-                        )
-                        continue
-
-                    if answer:
-                        state["context"].append({query: answer})
-                        logger.debug(
-                            f"Found validated answer for query: {query[:50]}... (length: {len(answer)})"
-                        )
-                    else:
-                        logger.warning(f"No answer found for query: {query}")
-
-                except Exception as e:
-                    logger.error(
-                        f"Error retrieving answer for query '{query}': {e}",
-                        exc_info=True,
-                    )
-                    continue
-        else:
-            logger.warning("No questions to search for, stopping")
-            state["stop"] = True
-
+    result = state.pop("_last_tool_result", None)
+    if not isinstance(result, dict):
         return state
 
-    except ValueError as e:
-        logger.error(f"Validation error in search_node: {e}", exc_info=True)
-        state["stop"] = True
-        return state
-    except Exception as e:
-        logger.error(f"Unexpected error in search_node: {e}", exc_info=True)
-        state["stop"] = True
-        return state
+    tool_name = str(result.get("tool_name", "unknown"))
+    state.setdefault("observations", []).append(result)
+
+    hints = result.get("hints") or {}
+    state_hints = state.setdefault("hints", {})
+    state_hints["chapter_ids"] = _merge_unique_ints(state_hints.get("chapter_ids", []), hints.get("chapter_ids", []))
+    state_hints["source_ids"] = _merge_unique_ints(state_hints.get("source_ids", []), hints.get("source_ids", []))
+    state_hints["entity_ids"] = _merge_unique_strs(state_hints.get("entity_ids", []), hints.get("entity_ids", []))
+    state_hints["entity_name_tokens"] = _merge_unique_strs(state_hints.get("entity_name_tokens", []), hints.get("entity_name_tokens", []))
+    state_hints["entity_names"] = _merge_unique_strs(state_hints.get("entity_names", []), hints.get("entity_names", []))
+
+    context = result.get("context") or {}
+    if isinstance(context, dict):
+        # source_ids from semantic context
+        state_hints["source_ids"] = _merge_unique_ints(state_hints.get("source_ids", []), context.get("source_ids", []))
+        _append_context_from_tool(state, tool_name, context)
+
+    selected_items = result.get("selected_items")
+    state.setdefault("retrieval_trace", []).append(
+        {
+            "query": state.get("user_question", ""),
+            "phases": [
+                {
+                    "phase": tool_name,
+                    "query": state.get("user_question", ""),
+                    "input_hints": result.get("input", {}).get("hints", {}),
+                    "selected_items": selected_items if isinstance(selected_items, list) else [],
+                    "rejected_items": result.get("rejected_items", []),
+                    "reason": state.get("route_reason", ""),
+                    "latency_ms": result.get("latency_ms", 0.0),
+                }
+            ],
+        }
+    )
+
+    evidence_item = {
+        "tool_name": tool_name,
+        "selected_count": len(selected_items) if isinstance(selected_items, list) else 0,
+        "latency_ms": result.get("latency_ms", 0.0),
+    }
+    state.setdefault("evidence", []).append(evidence_item)
+
+    return state
 
 
 def final_answer_node(state: AgentState) -> AgentState:
-    """
-    Узел формирования финального ответа на вопрос пользователя.
+    state = _initialize_default_values(state)
+    _validate_state(state)
 
-    Агрегирует всю собранную информацию и формирует финальный ответ
-    с помощью answer_agent.
-
-    Args:
-        state: Текущее состояние агента
-
-    Returns:
-        Обновленное состояние агента с финальным ответом
-
-    Raises:
-        RuntimeError: Если формирование ответа не удалось
-    """
     try:
-        # Валидация состояния
-        _validate_state(state)
+        result = answer_agent.invoke(
+            user_question=state["user_question"],
+            thoughts=state.get("thoughts", []),
+            context=state.get("context", []),
+        )
 
-        try:
-            result = answer_agent.invoke(
-                user_question=state["user_question"],
-                thoughts=state.get("thoughts", []),
-                context=state.get("context", []),
-            )
+        from src.agent.prompts.output_models import FinalAnswerOutput
 
-            # Обработка результата с Pydantic валидацией
-            from src.agent.prompts.output_models import FinalAnswerOutput
+        if isinstance(result, FinalAnswerOutput):
+            final_answer = result.final_answer
+        elif isinstance(result, dict):
+            try:
+                final_answer = FinalAnswerOutput(**result).final_answer
+            except Exception:
+                final_answer = str(result.get("final_answer", "")).strip()
+        else:
+            final_answer = str(result)
 
-            # Если результат уже является Pydantic моделью
-            if isinstance(result, FinalAnswerOutput):
-                answer_output = result
-                final_answer = answer_output.final_answer
-            elif isinstance(result, dict):
-                # Пытаемся создать модель из словаря (валидация)
-                try:
-                    answer_output = FinalAnswerOutput(**result)
-                    final_answer = answer_output.final_answer
-                except Exception as validation_error:
-                    logger.error(
-                        f"Validation error in final answer output: {validation_error}",
-                        exc_info=True,
-                    )
-                    # Fallback: используем значение из словаря, если есть
-                    final_answer = result.get("final_answer", "")
-                    if not final_answer or len(final_answer) < 50:
-                        logger.warning("Answer agent returned invalid final_answer")
-                        final_answer = "Не удалось сформировать валидный ответ на основе доступной информации. Попробуйте переформулировать вопрос."
-            else:
-                logger.warning(f"Answer agent returned unexpected type: {type(result)}")
-                final_answer = "Ошибка при формировании ответа."
+        if final_answer:
+            state["final_answer"] = final_answer
+        else:
+            state["final_answer"] = "?? ??????? ???????????? ????? ?? ?????? ?????????? ?????????."
 
-            if final_answer and len(final_answer) >= 50:
-                state["final_answer"] = final_answer
-                logger.info(
-                    f"Final answer generated successfully (length: {len(final_answer)})"
-                )
-            else:
-                logger.warning(
-                    f"Final answer too short or empty: {len(final_answer) if final_answer else 0}"
-                )
-                state["final_answer"] = (
-                    "Не удалось сформировать полный ответ на основе доступной информации."
-                )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Error in final_answer_node: %s", exc, exc_info=True)
+        state["final_answer"] = f"????????? ?????? ??? ???????????? ??????: {exc}"
 
-        except Exception as e:
-            logger.error(f"Error in answer_agent.invoke: {e}", exc_info=True)
-            state["final_answer"] = (
-                f"Произошла ошибка при формировании ответа: {str(e)}. "
-                "Попробуйте переформулировать вопрос."
-            )
+    state["stop"] = True
+    return state
 
-        return state
 
-    except ValueError as e:
-        logger.error(f"Validation error in final_answer_node: {e}", exc_info=True)
-        state["final_answer"] = "Ошибка валидации состояния агента."
-        return state
-    except Exception as e:
-        logger.error(f"Unexpected error in final_answer_node: {e}", exc_info=True)
-        state["final_answer"] = "Произошла неожиданная ошибка при формировании ответа."
-        return state
+# Backward-compatible wrappers for existing imports/tests.
+def reasoning_node(state: AgentState) -> AgentState:
+    return planner_node(state)
+
+
+def search_node(state: AgentState) -> AgentState:
+    state = tool_router_node(state)
+    if not state.get("final_ready"):
+        state = tool_exec_node(state)
+        state = observe_node(state)
+    return state
+
+
+def cond_edge_reasoner(state: AgentState) -> str:
+    if state.get("final_ready"):
+        return "final_answer_node"
+    return "search_node"

@@ -320,6 +320,225 @@ class RetrieveAgent(LLMBase):
                     source_ids.add(chapter_id)
         return source_ids
 
+    def tool_semantic_search(
+        self,
+        query: str,
+        hints: Optional[Dict[str, Any]] = None,
+        k: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        started = time.perf_counter()
+        k_value = int(k or settings.PHASE_A_RECALL_K)
+        phase_a = high_recall_search(query=query, k=k_value)
+        search_result: List[Document] = phase_a.get("documents") or []
+        phase_a_hints: Dict[str, Any] = phase_a.get("hints") or {}
+        classified = self._classify_search_docs(search_result)
+        quote_result = classified["quote_result"]
+        nodes_result = classified["nodes_result"]
+        rels_result = classified["rels_result"]
+        sums_result = classified["sums_result"]
+
+        graph_ctx = self.process_graph(rels_result, nodes_result)
+        source_ids = sorted(self._collect_source_ids(search_result))
+
+        return {
+            "tool_name": "semantic_search",
+            "input": {"query": query, "hints": hints or {}, "k": k_value},
+            "selected_items": phase_a_hints.get("selected_items", []),
+            "rejected_items": [],
+            "hints": {
+                "chapter_ids": phase_a_hints.get("chapter_ids", []),
+                "source_ids": phase_a_hints.get("source_ids", []),
+                "entity_ids": phase_a_hints.get("entity_ids", []),
+                "entity_name_tokens": phase_a_hints.get("entity_name_tokens", []),
+            },
+            "context": {
+                "nodes_texts": graph_ctx.get("nodes_texts", ""),
+                "rel_texts": graph_ctx.get("rel_texts", ""),
+                "quote_texts": "\n***\n".join(
+                    [
+                        f"{doc.page_content}. Глава {doc.metadata.get('source_id', doc.metadata.get('chapter_id', 'N/A'))}"
+                        for doc in quote_result
+                    ]
+                ),
+                "sums_texts": "\n***\n".join(
+                    [
+                        f"{doc.page_content}. Глава {doc.metadata.get('source_id', doc.metadata.get('chapter_id', 'N/A'))}"
+                        for doc in sums_result
+                    ]
+                ),
+                "source_ids": source_ids,
+            },
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+    def tool_deterministic_entity_search(
+        self,
+        query: str,
+        hints: Optional[Dict[str, Any]] = None,
+        top_k: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        started = time.perf_counter()
+        hints = hints or {}
+        top_k_value = int(top_k or settings.PHASE_B_MAX_ENTITIES)
+        index_hints = search_entity_chapter_index(
+            query=query,
+            hinted_entity_ids=hints.get("entity_ids", []),
+            top_k=top_k_value,
+        )
+        return {
+            "tool_name": "deterministic_entity_search",
+            "input": {"query": query, "hints": hints, "top_k": top_k_value},
+            "selected_items": index_hints.get("selected_items", []),
+            "rejected_items": index_hints.get("rejected_items", []),
+            "hints": {
+                "chapter_ids": index_hints.get("chapter_ids", []),
+                "entity_ids": [row.get("entity_id") for row in index_hints.get("entities", []) if row.get("entity_id")],
+                "entity_names": [row.get("main_name") for row in index_hints.get("entities", []) if row.get("main_name")],
+            },
+            "context": {
+                "entities_text": "\n***\n".join(
+                    [f"{row.get('main_name', '')}: {row.get('summary', '')}" for row in index_hints.get("entities", [])]
+                )
+            },
+            "reason": index_hints.get("reason", ""),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+    def tool_deterministic_graph_expand(
+        self,
+        query: str,
+        hints: Optional[Dict[str, Any]] = None,
+        depth: int = 1,
+        relation_priority: Optional[List[str]] = None,
+        limits: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, Any]:
+        started = time.perf_counter()
+        hints = hints or {}
+        limits = limits or {}
+        max_entities = int(limits.get("max_entities", settings.PHASE_B_MAX_ENTITIES))
+        max_relations = int(limits.get("max_relations", settings.PHASE_B_MAX_RELATIONS))
+        max_chapters = int(limits.get("max_chapters", settings.PHASE_B_MAX_CHAPTERS))
+        phase_b = guided_deterministic_search(
+            query=query,
+            input_hints={
+                "chapter_ids": hints.get("chapter_ids", []),
+                "source_ids": hints.get("source_ids", []),
+                "entity_ids": hints.get("entity_ids", []),
+                "entity_name_tokens": hints.get("entity_name_tokens", []),
+            },
+            max_entities=max_entities,
+            max_relations=max_relations,
+            max_chapters=max_chapters,
+        )
+
+        seed_entity_names = hints.get("entity_names") or [
+            row.get("main_name", "")
+            for row in (phase_b.get("entities") or [])
+        ]
+        traversal = traverse_relations_for_entities(
+            entity_names=[name for name in seed_entity_names if isinstance(name, str) and name],
+            max_edges=max_relations,
+        )
+        existing_rel_ids = {
+            row.get("relation_id")
+            for row in (phase_b.get("relations") or [])
+            if row.get("relation_id")
+        }
+        for rel in traversal.get("selected_items", []):
+            rel_id = rel.get("relation_id")
+            if rel_id and rel_id in existing_rel_ids:
+                continue
+            phase_b.setdefault("relations", []).append(rel)
+
+        context = self._format_phase_b_context(phase_b)
+        return {
+            "tool_name": "deterministic_graph_expand",
+            "input": {
+                "query": query,
+                "hints": hints,
+                "depth": depth,
+                "relation_priority": relation_priority or [],
+                "limits": limits,
+            },
+            "selected_items": {
+                "entities": phase_b.get("entities", []),
+                "relations": phase_b.get("relations", []),
+                "chapters": phase_b.get("chapters", []),
+            },
+            "rejected_items": phase_b.get("rejected_items", {}),
+            "hints": {
+                "chapter_ids": phase_b.get("chapter_ids", []),
+                "entity_ids": [row.get("entity_id") for row in (phase_b.get("entities") or []) if row.get("entity_id")],
+                "entity_names": [row.get("main_name") for row in (phase_b.get("entities") or []) if row.get("main_name")],
+            },
+            "context": context,
+            "reason": phase_b.get("reason", ""),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+    def tool_chapter_lookup(
+        self,
+        chapter_ids: Optional[List[int]] = None,
+        max_chapters: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        started = time.perf_counter()
+        chapter_ids = [int(v) for v in (chapter_ids or []) if isinstance(v, int)]
+        max_chapters_value = int(max_chapters or settings.MAX_CHAPTERS_IN_CONTEXT)
+        chapter_retriever = ChapterRetriever()
+        chapters_result = chapter_retriever.get_guided_chapters(
+            hint_chapter_ids=chapter_ids,
+            max_chapters=max_chapters_value,
+        )
+        chapters = chapters_result.get("chapters", {})
+        chapters_text = self._format_chapters_text(
+            chapters,
+            max_tokens_per_chapter=settings.MAX_CHAPTER_TOKENS,
+        )
+        selected_items = [
+            {
+                "chapter_id": int(cid),
+                "snippet": text[:320],
+            }
+            for cid, text in chapters.items()
+        ]
+        return {
+            "tool_name": "chapter_lookup",
+            "input": {"chapter_ids": chapter_ids, "max_chapters": max_chapters_value},
+            "selected_items": selected_items,
+            "rejected_items": chapters_result.get("rejected_items", []),
+            "hints": {"chapter_ids": chapters_result.get("selected_items", [])},
+            "context": {"chapters_text": chapters_text},
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
+    def run_tool(self, tool_name: str, **tool_input: Dict[str, Any]) -> Dict[str, Any]:
+        if tool_name == "semantic_search":
+            return self.tool_semantic_search(
+                query=str(tool_input.get("query", "")),
+                hints=tool_input.get("hints") or {},
+                k=tool_input.get("k"),
+            )
+        if tool_name == "deterministic_entity_search":
+            return self.tool_deterministic_entity_search(
+                query=str(tool_input.get("query", "")),
+                hints=tool_input.get("hints") or {},
+                top_k=tool_input.get("top_k"),
+            )
+        if tool_name == "deterministic_graph_expand":
+            return self.tool_deterministic_graph_expand(
+                query=str(tool_input.get("query", "")),
+                hints=tool_input.get("hints") or {},
+                depth=int(tool_input.get("depth", 1)),
+                relation_priority=tool_input.get("relation_priority") or [],
+                limits=tool_input.get("limits") or {},
+            )
+        if tool_name == "chapter_lookup":
+            return self.tool_chapter_lookup(
+                chapter_ids=tool_input.get("chapter_ids") or [],
+                max_chapters=tool_input.get("max_chapters"),
+            )
+        raise ValueError(f"Unknown tool: {tool_name}")
+
     def invoke(self, **kwargs: Dict[str, Any]) -> Dict[str, Any]:
         """
         Выполняет поиск и формирует ответ на запрос пользователя.

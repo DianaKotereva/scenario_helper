@@ -41,3 +41,24 @@ services:
       - .:/app
     ports:
       - "8501:8501"
+
+  hyperextract:
+    build:
+      context: .
+      dockerfile: docker/hyperextract.Dockerfile
+    container_name: hyperextract-worker
+    environment:
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_API_BASE=https://api.deepseek.com/v1
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_EMBEDDING_API_KEY=${OPENAI_EMBEDDING_API_KEY}
+      - OPENAI_API_BASE=${OPENAI_API_BASE:-https://api.proxyapi.ru/openai/v1}
+      - OPENAI_BASE_URL=${OPENAI_API_BASE:-https://api.proxyapi.ru/openai/v1}
+      - PYTHONIOENCODING=utf-8
+    volumes:
+      - ./.he:/root/.he
+      - .:/workspace/scenatio_helper
+      - ../Hyper-Extract:/workspace/Hyper-Extract
+      - ./data:/workspace/data
+      - ./test_data:/workspace/test_data
+      - ./tools:/workspace/tools

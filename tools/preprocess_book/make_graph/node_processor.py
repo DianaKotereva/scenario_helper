@@ -48,6 +48,67 @@ class NodeProcessor:
         }
         return mapping.get(raw, raw)
 
+    @staticmethod
+    def _collect_node_source_ids(node_obj: BookNode) -> Tuple[int, ...]:
+        source_ids = set()
+        for action in node_obj.actions or []:
+            sid = getattr(action, "source_id", None)
+            if isinstance(sid, int):
+                source_ids.add(int(sid))
+            elif isinstance(sid, tuple):
+                source_ids.update(int(v) for v in sid if isinstance(v, int))
+            elif isinstance(sid, list):
+                source_ids.update(int(v) for v in sid if isinstance(v, int))
+        return tuple(sorted(source_ids))
+
+    def _collect_candidate_mains(
+        self,
+        names: List[str],
+        all_book_nodes: AllBookNodes,
+        current_sid: int,
+    ) -> List[str]:
+        """Collect candidate node keys for verification without relying on single alias mapping."""
+        candidates = set()
+
+        # Fast path via names_list index.
+        for alias, main_key in all_book_nodes.names_list.items():
+            if any(self._name_match(alias, name) for name in names):
+                if main_key in all_book_nodes.nodes:
+                    candidates.add(main_key)
+
+        # Robust path: scan current graph to avoid alias-map collisions.
+        for node_key, node_obj in all_book_nodes.nodes.items():
+            node_names = [node_obj.main_name] + list(node_obj.alt_names or [])
+            if any(self._name_match(left, right) for left in names for right in node_names):
+                candidates.add(node_key)
+
+        def _has_previous_source(node_obj: BookNode) -> bool:
+            for sid in self._collect_node_source_ids(node_obj):
+                if sid < current_sid:
+                    return True
+            return False
+
+        return [
+            key
+            for key in candidates
+            if key in all_book_nodes.nodes and _has_previous_source(all_book_nodes.nodes[key])
+        ]
+
+    @staticmethod
+    def _make_internal_key(
+        main_name: str,
+        source_id: Tuple[int, ...],
+        all_book_nodes: AllBookNodes,
+    ) -> str:
+        sid = source_id[0] if source_id else -1
+        base = f"{main_name}__sid{sid}"
+        if base not in all_book_nodes.nodes:
+            return base
+        counter = 2
+        while f"{base}_{counter}" in all_book_nodes.nodes:
+            counter += 1
+        return f"{base}_{counter}"
+
     def _extract_action_objects(self, item: Dict[str, Any], source_id: Tuple[int, ...]) -> List[Action]:
         raw_actions = item.get("actions")
         fallback_sid = source_id[0] if source_id else 0
@@ -105,13 +166,6 @@ class NodeProcessor:
     ) -> AllBookNodes:
         current_sid = source_id[0] if source_id else 0
 
-        def _has_previous_source(node_obj: BookNode) -> bool:
-            for action in node_obj.actions:
-                sid = getattr(action, "source_id", None)
-                if isinstance(sid, tuple) and sid and isinstance(sid[0], int) and sid[0] < current_sid:
-                    return True
-            return False
-
         for item in input_data:
             try:
                 main_name = str(item.get("main_name", "")).strip()
@@ -126,30 +180,11 @@ class NodeProcessor:
                 ]
                 names = [main_name] + alt_names
 
-                all_names_to_use = [
-                    use_n
-                    for use_n in list(all_book_nodes.names_list.keys())
-                    if max(
-                        list(
-                            map(
-                                lambda x: x.lower() in use_n.lower()
-                                or use_n.lower() in x.lower(),
-                                names,
-                            )
-                        )
-                    )
-                ]
-                existing_mains = {
-                    all_book_nodes.names_list[name]
-                    for name in all_names_to_use
-                    if name in all_book_nodes.names_list
-                }
-                existing_mains = {
-                    existing_main
-                    for existing_main in existing_mains
-                    if existing_main in all_book_nodes.nodes
-                    and _has_previous_source(all_book_nodes.nodes[existing_main])
-                }
+                existing_mains = self._collect_candidate_mains(
+                    names=names,
+                    all_book_nodes=all_book_nodes,
+                    current_sid=current_sid,
+                )
 
                 new_classification = self._normalize_classification(item.get("classification"))
 
@@ -164,9 +199,14 @@ class NodeProcessor:
                 if target_main is not None:
                     target_node = all_book_nodes.nodes[target_main]
                 else:
-                    target_main = main_name
+                    # Non-destructive homonym handling:
+                    # if same main_name exists but verify=False, create unique internal key.
+                    if main_name in all_book_nodes.nodes:
+                        target_main = self._make_internal_key(main_name, source_id, all_book_nodes)
+                    else:
+                        target_main = main_name
                     target_node = BookNode(
-                        main_name=target_main,
+                        main_name=main_name,
                         classification=new_classification,
                         alt_names=alt_names,
                         actions=[],
@@ -174,7 +214,14 @@ class NodeProcessor:
                     all_book_nodes.nodes[target_main] = target_node
 
                 for name in names:
-                    all_book_nodes.names_list[name] = target_main
+                    # Keep first mapping for ambiguous aliases; add disambiguated alias for twins.
+                    if name not in all_book_nodes.names_list or all_book_nodes.names_list.get(name) == target_main:
+                        all_book_nodes.names_list[name] = target_main
+                    else:
+                        disambiguated = f"{name}__sid{current_sid}"
+                        all_book_nodes.names_list[disambiguated] = target_main
+                # Always map internal key itself for deterministic relation canonicalization.
+                all_book_nodes.names_list[target_main] = target_main
 
                 if target_main != main_name and main_name not in target_node.alt_names:
                     target_node.alt_names.append(main_name)
