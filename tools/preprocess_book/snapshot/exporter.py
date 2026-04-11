@@ -241,9 +241,24 @@ def _extract_raw_from_results(results_dir: Path, max_files: int) -> Tuple[List[E
     entities: List[EntityRecord] = []
     relations: List[RelationRecord] = []
     chapter_ids: List[int] = []
+
+    def _coerce_payload(raw: Any, chapter_id: int, fp: Path) -> Optional[Dict[str, Any]]:
+        if isinstance(raw, dict):
+            return raw
+        logger.warning(
+            "Skip non-dict extraction payload for chapter %s from %s (type=%s)",
+            chapter_id,
+            fp,
+            type(raw).__name__,
+        )
+        return None
+
     for chapter_id, fp in _iter_numeric_pickles(results_dir, max_files=max_files):
+        data_raw = pickle.load(fp.open("rb"))
+        data = _coerce_payload(data_raw, chapter_id, fp)
+        if not data:
+            continue
         chapter_ids.append(chapter_id)
-        data = pickle.load(fp.open("rb"))
         for node in data.get("nodes", []):
             main_name = str(node.get("main_name", "")).strip()
             if not main_name:

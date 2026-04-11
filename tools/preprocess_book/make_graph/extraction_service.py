@@ -11,7 +11,6 @@ from tools.preprocess_book.config.preprocess_settings import (
     BATCH_SIZE,
     EXTRACTION_CHAPTER_BATCH_SIZE,
     EXTRACTION_VALIDATION_RETRY_COUNT,
-    EXTRACTION_WRITE_PER_SOURCE_PKL,
     PARALLEL_CONCURRENCY,
     RESULTS_DIR,
 )
@@ -20,7 +19,6 @@ from tools.preprocess_book.prompts.extract_names import (
     ExtractedRelation,
     ExtractionPayload,
 )
-from tools.preprocess_book.storage.storage import FileManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +27,8 @@ class ExtractionService:
     """Service for extracting entities and relations from chapter texts."""
 
     def __init__(self, extractor, extractor_relations=None):
+        if extractor_relations is None:
+            raise ValueError("extractor_relations is required for two-stage extraction")
         self.extractor = extractor
         self.extractor_relations = extractor_relations
 
@@ -148,7 +148,7 @@ class ExtractionService:
 
         return out
 
-    def _legacy_to_schema(self, payload: Dict[str, Any], source_id: Any) -> Dict[str, Any]:
+    def _coerce_payload_schema(self, payload: Dict[str, Any], source_id: Any) -> Dict[str, Any]:
         fallback_source_id = self._first_source_id(source_id) or 0
 
         nodes_in = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
@@ -633,10 +633,6 @@ class ExtractionService:
         if nodes_payload is None:
             raise ValueError("nodes extraction returned non-json payload")
 
-        # Backward-compatible fallback: old one-stage setup.
-        if self.extractor_relations is None:
-            return nodes_payload
-
         known_nodes = nodes_payload.get("nodes")
         if not isinstance(known_nodes, list):
             known_nodes = []
@@ -701,7 +697,7 @@ class ExtractionService:
                 f"Extraction payload for source_id={source_id} is invalid ({type(result)})"
             )
 
-        coerced = self._legacy_to_schema(payload, source_id)
+        coerced = self._coerce_payload_schema(payload, source_id)
         coerced = self._merge_identity_alias_nodes(coerced, source_id)
         coerced = self._enforce_nodes_relations_closure(coerced, source_id)
         return self._validate_payload(coerced)
@@ -741,75 +737,6 @@ class ExtractionService:
             return normalized or None
 
         return None
-
-    @staticmethod
-    def _source_matches(value: Any, source_id: int) -> bool:
-        if isinstance(value, int):
-            return value == source_id
-        if isinstance(value, (tuple, list, set)):
-            return source_id in value
-        return False
-
-    def _slice_payload_by_source_id(
-        self,
-        payload: Dict[str, Any],
-        source_id: int,
-    ) -> Dict[str, Any]:
-        nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
-        relations = (
-            payload.get("relations") if isinstance(payload.get("relations"), list) else []
-        )
-
-        sliced_relations: List[Dict[str, Any]] = []
-        endpoint_names = set()
-        for rel in relations:
-            if not isinstance(rel, dict):
-                continue
-            descs = rel.get("descriptions") if isinstance(rel.get("descriptions"), list) else []
-            filtered_descs = [
-                d
-                for d in descs
-                if isinstance(d, dict) and self._source_matches(d.get("source_id"), source_id)
-            ]
-            if not filtered_descs:
-                continue
-
-            new_rel = dict(rel)
-            new_rel["descriptions"] = filtered_descs
-            sliced_relations.append(new_rel)
-
-            s_name = str(new_rel.get("source_node_id", "")).strip()
-            t_name = str(new_rel.get("target_node_id", "")).strip()
-            if s_name:
-                endpoint_names.add(s_name)
-            if t_name:
-                endpoint_names.add(t_name)
-
-        sliced_nodes: List[Dict[str, Any]] = []
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            actions = node.get("actions") if isinstance(node.get("actions"), list) else []
-            filtered_actions = [
-                a
-                for a in actions
-                if isinstance(a, dict) and self._source_matches(a.get("source_id"), source_id)
-            ]
-
-            main_name = str(node.get("main_name", "")).strip()
-            keep_node = bool(filtered_actions) or (main_name in endpoint_names)
-            if not keep_node:
-                continue
-
-            new_node = dict(node)
-            new_node["actions"] = filtered_actions
-            sliced_nodes.append(new_node)
-
-        return {
-            "nodes": sliced_nodes,
-            "relations": sliced_relations,
-            "summarization": str(payload.get("summarization", "") or ""),
-        }
 
     async def extract_from_texts_async(
         self,
@@ -893,19 +820,12 @@ class ExtractionService:
                     encoding="utf-8",
                 )
 
-                if EXTRACTION_WRITE_PER_SOURCE_PKL:
-                    for sid in source_tuple:
-                        source_filename = FileManager.get_source_filename((sid,))
-                        sliced_payload = self._slice_payload_by_source_id(normalized, sid)
-                        FileManager.save_pickle(
-                            sliced_payload,
-                            RESULTS_DIR / f"{source_filename}.pkl",
+                for sid in source_tuple:
+                    if sid % 5 == 0:
+                        logger.info(
+                            "Extraction progress marker: chapter source_id=%s",
+                            sid,
                         )
-                        if sid % 5 == 0:
-                            logger.info(
-                                "Extraction progress marker: chapter source_id=%s",
-                                sid,
-                            )
 
                 for text_idx in meta["indices"]:
                     if 0 <= text_idx < len(all_summarizations):

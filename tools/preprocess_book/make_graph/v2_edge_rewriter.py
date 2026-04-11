@@ -4,8 +4,8 @@ import json
 from typing import Dict, List, Tuple
 
 from src.utils.graph_search import AllBooksEdges, BookEdges, Description
-from tools.preprocess_book._v2.candidate_selector import normalize_text
-from tools.preprocess_book._v2.cluster_manager import ClusterManager
+from tools.preprocess_book.make_graph.v2_candidate_selector import normalize_text
+from tools.preprocess_book.make_graph.v2_cluster_manager import ClusterManager
 
 
 class EdgeRewriter:
@@ -41,6 +41,30 @@ class EdgeRewriter:
         raw_description = rel.get("description", "") or ""
         return f"{raw_description}\n[V2_PROVENANCE {provenance_json}]"
 
+    @staticmethod
+    def _iter_relation_evidence(rel: dict, default_source: Tuple[int, ...]) -> List[Tuple[str, Tuple[int, ...]]]:
+        """Normalize relation evidence from schema: descriptions=[{source_id, chapter_id, description, ...}, ...]."""
+        out: List[Tuple[str, Tuple[int, ...]]] = []
+        descriptions = rel.get("descriptions")
+        if isinstance(descriptions, list):
+            for item in descriptions:
+                if not isinstance(item, dict):
+                    continue
+                desc = str(item.get("description", "")).strip()
+                if not desc:
+                    continue
+                sid = item.get("source_id")
+                if isinstance(sid, int):
+                    out.append((desc, (sid,)))
+                elif isinstance(sid, tuple) and sid:
+                    out.append((desc, sid))
+                elif isinstance(sid, list) and sid:
+                    out.append((desc, tuple(int(v) for v in sid if isinstance(v, int))))
+                else:
+                    out.append((desc, default_source))
+            return out
+        return out
+
     def rewrite_relations(
         self, relations_by_source: Dict[Tuple[int, ...], List[dict]]
     ) -> AllBooksEdges:
@@ -59,16 +83,18 @@ class EdgeRewriter:
                     description_type = "IDENTITY_MERGED_CONTEXT"
 
                 pair = tuple(sorted([src, dst]))
-                description = Description(
-                    description=self._compose_description(rel, provenance_json),
-                    type=description_type,
-                    source_id=source_id,
-                )
                 existing = rel_graph.relationships.get(
                     pair,
                     BookEdges(object_1=pair[0], object_2=pair[1], description=[]),
                 )
-                if description not in existing.description:
-                    existing.description.append(description)
+
+                for raw_desc, desc_source_id in self._iter_relation_evidence(rel, source_id):
+                    description = Description(
+                        description=f"{raw_desc}\n[V2_PROVENANCE {provenance_json}]",
+                        type=description_type,
+                        source_id=desc_source_id,
+                    )
+                    if description not in existing.description:
+                        existing.description.append(description)
                 rel_graph.relationships[pair] = existing
         return rel_graph
