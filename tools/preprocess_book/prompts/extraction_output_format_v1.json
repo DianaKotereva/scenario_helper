@@ -1,0 +1,35 @@
+{
+  "version": "v1",
+  "description": "Locked extraction output contract. Keep 1:1 with historical prompt output structure.",
+  "top_level": {
+    "nodes": "list[Node]",
+    "relations": "list[Relation]",
+    "summarization": "str"
+  },
+  "node": {
+    "main_name": "str",
+    "alt_names": "list[str]",
+    "actions": "list[EvidenceItem]",
+    "classification": "str"
+  },
+  "relation": {
+    "source_node_id": "str",
+    "source_node_type": "str",
+    "target_node_id": "str",
+    "target_node_type": "str",
+    "type": "str",
+    "descriptions": "list[EvidenceItem]"
+  },
+  "evidence_item": {
+    "source_id": "int",
+    "chapter_id": "int",
+    "description": "str"
+  },
+  "classification_enum": [
+    "персонаж",
+    "место",
+    "организация",
+    "термин",
+    "сила природы"
+  ]
+}
