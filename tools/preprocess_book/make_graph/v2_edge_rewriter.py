@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from src.utils.graph_search import AllBooksEdges, BookEdges, Description
 from tools.preprocess_book.make_graph.v2_candidate_selector import normalize_text
@@ -12,34 +11,27 @@ class EdgeRewriter:
     def __init__(self, cluster_manager: ClusterManager):
         self.cluster_manager = cluster_manager
 
-    def _resolve_name(self, value: str) -> str | None:
-        cluster_id = self.cluster_manager.name_to_cluster.get(normalize_text(value))
-        if not cluster_id:
+    def _resolve_cluster_id(
+        self,
+        value: str,
+        source_hint: Optional[Set[int]] = None,
+    ) -> str | None:
+        candidates = self.cluster_manager.candidate_cluster_ids_for_name(value)
+        if not candidates:
             return None
-        root_id = self.cluster_manager.resolve_cluster_id(cluster_id)
-        cluster = self.cluster_manager.clusters.get(root_id)
-        if not cluster or not cluster.is_active:
-            return None
-        return cluster.canonical_name
+        hint = {int(v) for v in (source_hint or set()) if isinstance(v, int)}
 
-    @staticmethod
-    def _build_provenance(rel: dict, src_canonical: str, dst_canonical: str) -> str:
-        source_raw = rel.get("source_node_id", "") or ""
-        target_raw = rel.get("target_node_id", "") or ""
-        payload = {
-            "source_raw": source_raw,
-            "target_raw": target_raw,
-            "source_canonical": src_canonical,
-            "target_canonical": dst_canonical,
-            "source_aspect": source_raw if source_raw and source_raw != src_canonical else "",
-            "target_aspect": target_raw if target_raw and target_raw != dst_canonical else "",
-        }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        def _score(cluster_id: str) -> Tuple[int, int, int]:
+            cluster = self.cluster_manager.clusters.get(cluster_id)
+            if not cluster or not cluster.is_active:
+                return (-1, -1, -1)
+            cluster_sources = self.cluster_manager.cluster_source_ids(cluster_id)
+            overlap = len(cluster_sources.intersection(hint)) if hint else 0
+            exact_main = int(normalize_text(cluster.canonical_name) == normalize_text(value))
+            support = len(cluster.event_ids)
+            return (overlap, exact_main, support)
 
-    @staticmethod
-    def _compose_description(rel: dict, provenance_json: str) -> str:
-        raw_description = rel.get("description", "") or ""
-        return f"{raw_description}\n[V2_PROVENANCE {provenance_json}]"
+        return max(candidates, key=_score)
 
     @staticmethod
     def _iter_relation_evidence(rel: dict, default_source: Tuple[int, ...]) -> List[Tuple[str, Tuple[int, ...]]]:
@@ -66,17 +58,45 @@ class EdgeRewriter:
         return out
 
     def rewrite_relations(
-        self, relations_by_source: Dict[Tuple[int, ...], List[dict]]
+        self,
+        relations_by_source: Dict[Tuple[int, ...], List[dict]],
+        cluster_to_node_key: Optional[Dict[str, str]] = None,
     ) -> AllBooksEdges:
         rel_graph = AllBooksEdges(relationships={})
         for source_id, rel_list in relations_by_source.items():
             for rel in rel_list:
-                src = self._resolve_name(rel.get("source_node_id", ""))
-                dst = self._resolve_name(rel.get("target_node_id", ""))
-                if not src or not dst:
+                evidence_rows = self._iter_relation_evidence(rel, source_id)
+                source_hint: Set[int] = set()
+                for _desc_text, sid in evidence_rows:
+                    source_hint.update(int(v) for v in sid if isinstance(v, int))
+
+                src_cluster = self._resolve_cluster_id(
+                    rel.get("source_node_id", ""),
+                    source_hint=source_hint,
+                )
+                dst_cluster = self._resolve_cluster_id(
+                    rel.get("target_node_id", ""),
+                    source_hint=source_hint,
+                )
+                if not src_cluster or not dst_cluster:
                     continue
 
-                provenance_json = self._build_provenance(rel, src, dst)
+                src_cluster_obj = self.cluster_manager.clusters.get(src_cluster)
+                dst_cluster_obj = self.cluster_manager.clusters.get(dst_cluster)
+                if not src_cluster_obj or not dst_cluster_obj:
+                    continue
+
+                src = (
+                    cluster_to_node_key.get(src_cluster, src_cluster_obj.canonical_name)
+                    if cluster_to_node_key
+                    else src_cluster_obj.canonical_name
+                )
+                dst = (
+                    cluster_to_node_key.get(dst_cluster, dst_cluster_obj.canonical_name)
+                    if cluster_to_node_key
+                    else dst_cluster_obj.canonical_name
+                )
+
                 description_type = rel.get("type", "") or ""
                 if src == dst:
                     # Keep explicit evidence when two aliases collapsed into the same canonical node.
@@ -88,9 +108,9 @@ class EdgeRewriter:
                     BookEdges(object_1=pair[0], object_2=pair[1], description=[]),
                 )
 
-                for raw_desc, desc_source_id in self._iter_relation_evidence(rel, source_id):
+                for raw_desc, desc_source_id in evidence_rows:
                     description = Description(
-                        description=f"{raw_desc}\n[V2_PROVENANCE {provenance_json}]",
+                        description=raw_desc,
                         type=description_type,
                         source_id=desc_source_id,
                     )

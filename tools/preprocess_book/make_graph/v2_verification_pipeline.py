@@ -2,18 +2,26 @@
 
 import asyncio
 import logging
+import os
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from src.utils.graph_search import Action, AllBookNodes, BookGraph, BookNode
-from tools.preprocess_book.make_graph.v2_candidate_selector import CandidateSelector, normalize_text
+from tools.preprocess_book.make_graph.v2_candidate_selector import (
+    CandidateSelector,
+    normalize_text,
+)
 from tools.preprocess_book.make_graph.v2_cluster_manager import ClusterManager
 from tools.preprocess_book.make_graph.v2_edge_rewriter import EdgeRewriter
 from tools.preprocess_book.make_graph.v2_io import append_jsonl, load_results
 from tools.preprocess_book.make_graph.v2_llm_judge import LLMJudge
-from tools.preprocess_book.make_graph.v2_models import NodeEvent, RepairCandidate, VerificationDecision
+from tools.preprocess_book.make_graph.v2_models import (
+    NodeEvent,
+    RepairCandidate,
+    VerificationDecision,
+)
 from tools.preprocess_book.storage.storage import FileManager
 
 logger = logging.getLogger(__name__)
@@ -76,6 +84,8 @@ class VerificationPipelineV2:
         max_files: int | None = None,
         enable_bridge_merge: bool = True,
         judge_concurrency: int = 6,
+        strict_source_coverage: bool | None = None,
+        strict_extraction_coverage: bool | None = None,
     ):
         self.results_dir = results_dir
         self.output_path = output_path
@@ -84,11 +94,87 @@ class VerificationPipelineV2:
         self.max_files = max_files
         self.enable_bridge_merge = enable_bridge_merge
         self.judge_concurrency = max(1, judge_concurrency)
+        self.strict_source_coverage = (
+            bool(strict_source_coverage)
+            if strict_source_coverage is not None
+            else os.getenv("V2_STRICT_SOURCE_COVERAGE", "false").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.strict_extraction_coverage = (
+            bool(strict_extraction_coverage)
+            if strict_extraction_coverage is not None
+            else os.getenv("V2_STRICT_EXTRACTION_COVERAGE", "false").lower()
+            in {"1", "true", "yes", "on"}
+        )
 
         self.selector = CandidateSelector(top_k=top_k)
         self.cluster_manager = ClusterManager()
         self.judge = LLMJudge(llm_type=llm_type, enabled=llm_enabled)
         self._judge_semaphore = asyncio.Semaphore(self.judge_concurrency)
+
+    @staticmethod
+    def _extract_source_ids_from_payload(payload: dict) -> set[int]:
+        source_ids: set[int] = set()
+        nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else []
+        relations = (
+            payload.get("relations")
+            if isinstance(payload.get("relations"), list)
+            else []
+        )
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            for action in (
+                node.get("actions") if isinstance(node.get("actions"), list) else []
+            ):
+                if isinstance(action, dict) and isinstance(
+                    action.get("source_id"), int
+                ):
+                    source_ids.add(int(action["source_id"]))
+
+        for rel in relations:
+            if not isinstance(rel, dict):
+                continue
+            for desc in (
+                rel.get("descriptions")
+                if isinstance(rel.get("descriptions"), list)
+                else []
+            ):
+                if isinstance(desc, dict) and isinstance(desc.get("source_id"), int):
+                    source_ids.add(int(desc["source_id"]))
+
+        return source_ids
+
+    def _extract_source_ids_from_clusters(self) -> set[int]:
+        source_ids: set[int] = set()
+        for cluster in self.cluster_manager.get_active_clusters().values():
+            for _action, sid in cluster.actions:
+                if isinstance(sid, tuple):
+                    source_ids.update(int(v) for v in sid if isinstance(v, int))
+                elif isinstance(sid, int):
+                    source_ids.add(int(sid))
+        return source_ids
+
+    @staticmethod
+    def _extract_source_ids_from_relations_by_source(
+        relations_by_source: Dict[Tuple[int, ...], List[dict]],
+    ) -> set[int]:
+        source_ids: set[int] = set()
+        for rel_list in relations_by_source.values():
+            for rel in rel_list:
+                if not isinstance(rel, dict):
+                    continue
+                for desc in (
+                    rel.get("descriptions")
+                    if isinstance(rel.get("descriptions"), list)
+                    else []
+                ):
+                    if isinstance(desc, dict) and isinstance(
+                        desc.get("source_id"), int
+                    ):
+                        source_ids.add(int(desc["source_id"]))
+        return source_ids
 
     @staticmethod
     def _confidence_bonus(confidence: str) -> float:
@@ -178,7 +264,9 @@ class VerificationPipelineV2:
         if (
             sig_a["child_of"]
             and sig_b["child_of"]
-            and not VerificationPipelineV2._anchors_overlap(sig_a["child_of"], sig_b["child_of"])
+            and not VerificationPipelineV2._anchors_overlap(
+                sig_a["child_of"], sig_b["child_of"]
+            )
         ):
             return "hard_negative:child_of_conflict"
 
@@ -192,9 +280,13 @@ class VerificationPipelineV2:
             return "hard_negative:grandchild_of_conflict"
 
         # Impossible cycle: one cluster says child_of(X), another says parent_of(X).
-        if VerificationPipelineV2._anchors_overlap(sig_a["child_of"], sig_b["parent_of"]):
+        if VerificationPipelineV2._anchors_overlap(
+            sig_a["child_of"], sig_b["parent_of"]
+        ):
             return "hard_negative:child_parent_cycle"
-        if VerificationPipelineV2._anchors_overlap(sig_b["child_of"], sig_a["parent_of"]):
+        if VerificationPipelineV2._anchors_overlap(
+            sig_b["child_of"], sig_a["parent_of"]
+        ):
             return "hard_negative:child_parent_cycle"
 
         return None
@@ -268,6 +360,34 @@ class VerificationPipelineV2:
         return ". ".join(chunks)
 
     @staticmethod
+    def _extract_action_entries(
+        raw_actions, fallback_source: Tuple[int, ...]
+    ) -> List[Tuple[str, Tuple[int, ...]]]:
+        entries: List[Tuple[str, Tuple[int, ...]]] = []
+        if isinstance(raw_actions, list):
+            for item in raw_actions:
+                if isinstance(item, dict):
+                    desc = str(item.get("description", "")).strip()
+                    if not desc:
+                        continue
+                    sid = item.get("source_id")
+                    if isinstance(sid, int):
+                        entries.append((desc, (int(sid),)))
+                    elif fallback_source:
+                        entries.append((desc, fallback_source))
+                    continue
+                if isinstance(item, str):
+                    desc = item.strip()
+                    if desc:
+                        entries.append((desc, fallback_source))
+            return entries
+        if isinstance(raw_actions, str):
+            desc = raw_actions.strip()
+            if desc:
+                entries.append((desc, fallback_source))
+        return entries
+
+    @staticmethod
     def _event_chapter_id(raw: dict, fallback_source: Tuple[int, ...]) -> int:
         fallback = int(fallback_source[0]) if fallback_source else 0
         actions = raw.get("actions")
@@ -288,18 +408,26 @@ class VerificationPipelineV2:
         # Generic names are allowed only with explicit alias and strong lexical match.
         return explicit_alias and cand.name_score >= 0.90
 
-    def _build_event(self, source_id: Tuple[int, ...], idx: int, raw: dict) -> NodeEvent:
+    def _build_event(
+        self, source_id: Tuple[int, ...], idx: int, raw: dict
+    ) -> NodeEvent:
         chapter_id = self._event_chapter_id(raw, source_id)
-        alt_names, kinship_aliases = self._split_alt_names(list(raw.get("alt_names", []) or []))
+        alt_names, kinship_aliases = self._split_alt_names(
+            list(raw.get("alt_names", []) or [])
+        )
+        raw_actions = raw.get("actions", "")
         return NodeEvent(
             source_id=source_id,
             chapter_id=chapter_id,
             main_name=raw.get("main_name", ""),
             alt_names=alt_names,
             kinship_aliases=kinship_aliases,
-            classification=self._normalize_classification(raw.get("classification", "")),
-            actions=self._flatten_actions(raw.get("actions", "")),
+            classification=self._normalize_classification(
+                raw.get("classification", "")
+            ),
+            actions=self._flatten_actions(raw_actions),
             event_idx=idx,
+            action_entries=self._extract_action_entries(raw_actions, source_id),
         )
 
     async def _judge_candidate_async(self, event: NodeEvent, cand, cluster) -> dict:
@@ -439,7 +567,9 @@ class VerificationPipelineV2:
             reason="judge_reject_all",
         )
 
-    async def _verify_events_batch_async(self, events: List[NodeEvent]) -> List[VerificationDecision]:
+    async def _verify_events_batch_async(
+        self, events: List[NodeEvent]
+    ) -> List[VerificationDecision]:
         """
         Async batch verification for a set of events.
 
@@ -492,7 +622,9 @@ class VerificationPipelineV2:
             return a_root, b_root
         return tuple(sorted([a_root, b_root]))  # deterministic fallback
 
-    async def _judge_repair_candidate_async(self, iteration: int, cand: RepairCandidate) -> dict:
+    async def _judge_repair_candidate_async(
+        self, iteration: int, cand: RepairCandidate
+    ) -> dict:
         a_root = self.cluster_manager.resolve_cluster_id(cand.cluster_a_id)
         b_root = self.cluster_manager.resolve_cluster_id(cand.cluster_b_id)
         if a_root == b_root:
@@ -502,7 +634,11 @@ class VerificationPipelineV2:
         if not ca or not cb or not ca.is_active or not cb.is_active:
             return {"skip": True, "reason": "inactive_cluster", "candidate": cand}
         if ca.classification != cb.classification:
-            return {"skip": True, "reason": "classification_mismatch", "candidate": cand}
+            return {
+                "skip": True,
+                "reason": "classification_mismatch",
+                "candidate": cand,
+            }
         hard_negative_reason = self._hard_negative_reason(ca, cb)
         if hard_negative_reason:
             return {"skip": True, "reason": hard_negative_reason, "candidate": cand}
@@ -544,7 +680,9 @@ class VerificationPipelineV2:
             )
             return 0
 
-        tasks = [self._judge_repair_candidate_async(iteration, cand) for cand in candidates]
+        tasks = [
+            self._judge_repair_candidate_async(iteration, cand) for cand in candidates
+        ]
         results = await asyncio.gather(*tasks)
 
         accepted = [
@@ -635,7 +773,9 @@ class VerificationPipelineV2:
         )
         return merges
 
-    async def _repair_to_convergence_async(self, max_iterations: int = 6) -> tuple[int, int]:
+    async def _repair_to_convergence_async(
+        self, max_iterations: int = 6
+    ) -> tuple[int, int]:
         total_merges = 0
         iterations = 0
         for iteration in range(1, max_iterations + 1):
@@ -646,8 +786,30 @@ class VerificationPipelineV2:
                 break
         return total_merges, iterations
 
-    def _to_book_graph(self, relations_by_source: Dict[Tuple[int, ...], List[dict]]) -> BookGraph:
+    def _to_book_graph(
+        self, relations_by_source: Dict[Tuple[int, ...], List[dict]]
+    ) -> BookGraph:
         all_nodes = AllBookNodes(nodes={}, names_list={})
+        canonical_name_counter: Dict[str, int] = {}
+        cluster_to_node_key: Dict[str, str] = {}
+
+        def _unique_key_for_canonical(canonical_name: str, cluster_id: str) -> str:
+            base = canonical_name or cluster_id
+            if base not in all_nodes.nodes:
+                return base
+            canonical_name_counter[base] = canonical_name_counter.get(base, 1) + 1
+            candidate = f"{base}__{cluster_id}"
+            if candidate not in all_nodes.nodes:
+                return candidate
+            return f"{base}__{cluster_id}__{canonical_name_counter[base]}"
+
+        def _safe_alias_map(alias: str, target_key: str) -> None:
+            if not alias:
+                return
+            existing = all_nodes.names_list.get(alias)
+            if existing is None or existing == target_key:
+                all_nodes.names_list[alias] = target_key
+
         for cluster in self.cluster_manager.get_active_clusters().values():
             node = BookNode(
                 main_name=cluster.canonical_name,
@@ -655,24 +817,44 @@ class VerificationPipelineV2:
                 alt_names=list(cluster.alt_names),
                 actions=[Action(action=a, source_id=sid) for a, sid in cluster.actions],
             )
-            all_nodes.nodes[node.main_name] = node
-            all_nodes.names_list[node.main_name] = node.main_name
+            node_key = _unique_key_for_canonical(node.main_name, cluster.cluster_id)
+            cluster_to_node_key[cluster.cluster_id] = node_key
+            all_nodes.nodes[node_key] = node
+            _safe_alias_map(node.main_name, node_key)
             for alt in node.alt_names:
-                all_nodes.names_list[alt] = node.main_name
+                _safe_alias_map(alt, node_key)
+            if node_key != node.main_name:
+                _safe_alias_map(f"{node.main_name}__{cluster.cluster_id}", node_key)
+                _safe_alias_map(cluster.cluster_id, node_key)
 
-        rel_graph = EdgeRewriter(self.cluster_manager).rewrite_relations(relations_by_source)
+        rel_graph = EdgeRewriter(self.cluster_manager).rewrite_relations(
+            relations_by_source,
+            cluster_to_node_key=cluster_to_node_key,
+        )
         return BookGraph(nodes=all_nodes, relationships=rel_graph)
 
     async def run_async(self) -> BookGraph:
         results = load_results(self.results_dir, max_files=self.max_files)
-        logger.info("Loaded %s extraction result files from %s", len(results), self.results_dir)
+        logger.info(
+            "Loaded %s extraction result files from %s", len(results), self.results_dir
+        )
 
         relations_by_source: Dict[Tuple[int, ...], List[dict]] = {}
+        cumulative_expected_source_ids: set[int] = set()
         for payload in results:
             source_id = payload["_source_id"]
             nodes = payload.get("nodes", []) or []
             relations = payload.get("relations", []) or []
             relations_by_source[source_id] = relations
+            expected_source_ids = {int(v) for v in source_id if isinstance(v, int)}
+            extracted_source_ids = self._extract_source_ids_from_payload(payload)
+            missing_in_extraction = sorted(expected_source_ids - extracted_source_ids)
+            if self.strict_extraction_coverage and missing_in_extraction:
+                raise RuntimeError(
+                    "V2 extraction coverage gate failed: "
+                    f"source_id={source_id}, missing={missing_in_extraction}, "
+                    f"expected={sorted(expected_source_ids)}, extracted={sorted(extracted_source_ids)}"
+                )
 
             events = [
                 self._build_event(source_id, idx, raw_node)
@@ -682,7 +864,9 @@ class VerificationPipelineV2:
 
             for event, decision in zip(events, decisions, strict=True):
                 if decision.accepted_cluster_id:
-                    cid = self.cluster_manager.resolve_cluster_id(decision.accepted_cluster_id)
+                    cid = self.cluster_manager.resolve_cluster_id(
+                        decision.accepted_cluster_id
+                    )
                     self.cluster_manager.attach_event(cid, event)
                     assigned = cid
                     action = "attach"
@@ -713,6 +897,38 @@ class VerificationPipelineV2:
                         ],
                         "judge_traces": decision.judge_traces,
                     },
+                )
+
+            cumulative_expected_source_ids.update(expected_source_ids)
+            graph_source_ids = self._extract_source_ids_from_clusters().union(
+                self._extract_source_ids_from_relations_by_source(relations_by_source)
+            )
+            missing_current = sorted(expected_source_ids - graph_source_ids)
+            missing_cumulative = sorted(
+                cumulative_expected_source_ids - graph_source_ids
+            )
+
+            append_jsonl(
+                self.logs_path,
+                {
+                    "stage": "batch_coverage",
+                    "source_id": source_id,
+                    "expected_source_ids_current": sorted(expected_source_ids),
+                    "expected_source_ids_cumulative": sorted(
+                        cumulative_expected_source_ids
+                    ),
+                    "extracted_source_ids_current": sorted(extracted_source_ids),
+                    "missing_source_ids_in_extraction": missing_in_extraction,
+                    "graph_source_ids_present": sorted(graph_source_ids),
+                    "missing_source_ids_current": missing_current,
+                    "missing_source_ids_cumulative": missing_cumulative,
+                },
+            )
+
+            if self.strict_source_coverage and missing_current:
+                raise RuntimeError(
+                    "V2 source coverage gate failed: "
+                    f"source_id={source_id}, missing_current={missing_current}"
                 )
 
         repair_merges = 0

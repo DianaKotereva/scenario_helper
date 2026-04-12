@@ -17,17 +17,19 @@ BASE_DIR = Path(__file__).parent.parent.parent.parent
 TOOLS_DIR = BASE_DIR / "tools"
 PREPROCESS_DIR = TOOLS_DIR / "preprocess_book"
 DATA_DIR = BASE_DIR / "data"
+PROCESSED_DATA_DIR = BASE_DIR / "processed_data"
+PREPROCESS_WORK_DIR = PROCESSED_DATA_DIR / "preprocess_work"
 
 # Директории для обработки книги
 BOOK_INPUT_DIR = Path(os.getenv("BOOK_INPUT_DIR", str(DATA_DIR)))
-RESULTS_DIR = Path(os.getenv("RESULTS_DIR", str(PREPROCESS_DIR / "results")))
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", str(PREPROCESS_WORK_DIR / "results")))
 GRAPH_NODES_DIR = Path(
-    os.getenv("GRAPH_NODES_DIR", str(PREPROCESS_DIR / "graph_nodes"))
+    os.getenv("GRAPH_NODES_DIR", str(PREPROCESS_WORK_DIR / "graph_nodes"))
 )
 GRAPH_RELATIONS_DIR = Path(
-    os.getenv("GRAPH_RELATIONS_DIR", str(PREPROCESS_DIR / "graph_relations"))
+    os.getenv("GRAPH_RELATIONS_DIR", str(PREPROCESS_WORK_DIR / "graph_relations"))
 )
-SUMMARIES_DIR = Path(os.getenv("SUMMARIES_DIR", str(PREPROCESS_DIR / "summaries")))
+SUMMARIES_DIR = Path(os.getenv("SUMMARIES_DIR", str(PREPROCESS_WORK_DIR / "summaries")))
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(DATA_DIR)))
 
 # Настройки LLM

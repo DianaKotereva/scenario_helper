@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from tools.preprocess_book.make_graph.v2_candidate_selector import jaccard, normalize_text, tokenize
 from tools.preprocess_book.make_graph.v2_models import EntityCluster, NodeEvent, RepairCandidate
@@ -18,6 +18,8 @@ class ClusterManager:
     def __init__(self):
         self.clusters: Dict[str, EntityCluster] = {}
         self.name_to_cluster: Dict[str, str] = {}
+        # Ambiguous aliases map to multiple candidate clusters (homonyms/roles).
+        self.ambiguous_name_to_clusters: Dict[str, Set[str]] = {}
         self._counter = 0
 
     def _next_cluster_id(self) -> str:
@@ -33,17 +35,66 @@ class ClusterManager:
     def _register_name(self, name: str, cluster_id: str) -> None:
         if not name:
             return
-        self.name_to_cluster[normalize_text(name)] = cluster_id
+        norm_name = normalize_text(name)
+        if not norm_name:
+            return
+        resolved_new = self.resolve_cluster_id(cluster_id)
+        existing = self.name_to_cluster.get(norm_name)
+        if existing is None:
+            self.name_to_cluster[norm_name] = resolved_new
+            return
+
+        resolved_existing = self.resolve_cluster_id(existing)
+        if resolved_existing == resolved_new:
+            self.name_to_cluster[norm_name] = resolved_existing
+            return
+
+        # Keep existing fast-path mapping stable and track ambiguity explicitly.
+        bucket = self.ambiguous_name_to_clusters.setdefault(norm_name, set())
+        bucket.add(resolved_existing)
+        bucket.add(resolved_new)
+
+    def candidate_cluster_ids_for_name(self, name: str) -> Set[str]:
+        norm_name = normalize_text(name)
+        if not norm_name:
+            return set()
+
+        candidates: Set[str] = set()
+        mapped = self.name_to_cluster.get(norm_name)
+        if mapped:
+            candidates.add(self.resolve_cluster_id(mapped))
+
+        bucket = self.ambiguous_name_to_clusters.get(norm_name, set())
+        for cid in bucket:
+            candidates.add(self.resolve_cluster_id(cid))
+
+        return {
+            cid
+            for cid in candidates
+            if cid in self.clusters and self.clusters[cid].is_active
+        }
+
+    def cluster_source_ids(self, cluster_id: str) -> Set[int]:
+        root = self.resolve_cluster_id(cluster_id)
+        cluster = self.clusters.get(root)
+        if not cluster or not cluster.is_active:
+            return set()
+        out: Set[int] = set()
+        for _action, sid in cluster.actions:
+            if isinstance(sid, tuple):
+                out.update(int(v) for v in sid if isinstance(v, int))
+        return out
 
     def create_cluster(self, event: NodeEvent) -> str:
         cluster_id = self._next_cluster_id()
+        action_items = event.action_entries or [(event.actions, event.source_id)]
         cluster = EntityCluster(
             cluster_id=cluster_id,
             canonical_name=event.main_name,
             classification=event.classification,
             alt_names=list(dict.fromkeys(event.alt_names)),
             kinship_aliases=list(dict.fromkeys(event.kinship_aliases)),
-            actions=[(event.actions, event.source_id)],
+            actions=list(action_items),
             event_ids=[f"{event.chapter_id}:{event.event_idx}"],
             first_seen_chapter=event.chapter_id,
             last_seen_chapter=event.chapter_id,
@@ -57,7 +108,8 @@ class ClusterManager:
         root_id = self.resolve_cluster_id(cluster_id)
         cluster = self.clusters[root_id]
         cluster.last_seen_chapter = max(cluster.last_seen_chapter, event.chapter_id)
-        cluster.actions.append((event.actions, event.source_id))
+        action_items = event.action_entries or [(event.actions, event.source_id)]
+        cluster.actions.extend(action_items)
         cluster.event_ids.append(f"{event.chapter_id}:{event.event_idx}")
 
         for name in event.alt_names:
@@ -137,7 +189,13 @@ class ClusterManager:
 
     @staticmethod
     def cluster_support_score(cluster: EntityCluster) -> float:
-        chapter_count = len({sid[0] for _action, sid in cluster.actions if sid})
+        chapter_ids = {
+            sid_item
+            for _action, sid in cluster.actions
+            for sid_item in (sid or ())
+            if isinstance(sid_item, int)
+        }
+        chapter_count = len(chapter_ids)
         return (1.0 * len(cluster.event_ids)) + (0.6 * chapter_count) + (0.2 * len(cluster.actions))
 
     def candidate_clusters_for_repair(

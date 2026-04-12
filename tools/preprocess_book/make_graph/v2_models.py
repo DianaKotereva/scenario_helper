@@ -14,6 +14,7 @@ class NodeEvent:
     classification: str
     actions: str
     event_idx: int
+    action_entries: List[Tuple[str, Tuple[int, ...]]] = field(default_factory=list)
 
     @property
     def all_names(self) -> List[str]:

@@ -501,12 +501,29 @@ def export_snapshot(
             len(raw_relations),
         )
 
+    merged_entities, merged_relations, entity_index = _extract_merged_entities_and_relations(merged_graph_path)
     if not chapter_ids:
-        raise RuntimeError("No chapter ids found for snapshot export. Provide results_dir or graph_* dirs.")
+        inferred_ids: set[int] = set()
+        for item in merged_entities:
+            for cid in item.chapter_ids or []:
+                if isinstance(cid, int):
+                    inferred_ids.add(cid)
+        for item in merged_relations:
+            if isinstance(item.chapter_id, int):
+                inferred_ids.add(item.chapter_id)
+            meta_source_ids = (item.metadata or {}).get("source_ids", [])
+            if isinstance(meta_source_ids, list):
+                inferred_ids.update(int(v) for v in meta_source_ids if isinstance(v, int))
+        chapter_ids = sorted(inferred_ids)
+
+    if not chapter_ids:
+        raise RuntimeError(
+            "No chapter ids found for snapshot export. "
+            "Provide results_dir/graph_* dirs or merged_graph with source_id evidence."
+        )
 
     chapters = _build_chapters(book_path=book_path, chapter_ids=chapter_ids)
     chunks = _build_chunks(chapters=chapters, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    merged_entities, merged_relations, entity_index = _extract_merged_entities_and_relations(merged_graph_path)
 
     entities_rows = [asdict(v) for v in raw_entities] + [asdict(v) for v in merged_entities]
     relations_rows = [asdict(v) for v in raw_relations] + [asdict(v) for v in merged_relations]

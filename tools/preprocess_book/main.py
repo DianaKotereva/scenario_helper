@@ -10,14 +10,11 @@ import argparse
 import hashlib
 import json
 import logging
-import math
 import sys
 from pathlib import Path
 
 from langchain_core.output_parsers import JsonOutputParser
-from src.utils.graph_search import BookGraph
 from tools.preprocess_book.config.preprocess_settings import (
-    EXTRACTION_CHAPTER_BATCH_SIZE,
     OUTPUT_DIR,
     SUMMARIES_DIR,
     VECTORSTORE_CHUNK_SIZE,
@@ -39,10 +36,6 @@ from tools.preprocess_book.load_to_vectorstore.quality_gates import (
     validate_non_chapter_documents,
 )
 from tools.preprocess_book.make_graph.extraction_service import ExtractionService
-from tools.preprocess_book.make_graph.batch_graph_builder import BatchGraphBuilder
-from tools.preprocess_book.make_graph.node_processor import NodeProcessor
-from tools.preprocess_book.make_graph.relation_processor import RelationProcessor
-from tools.preprocess_book.make_graph.verification_service import VerificationService
 from tools.preprocess_book.make_summaries import (
     SummarizationPrompt,
     SummarizationService,
@@ -209,13 +202,6 @@ def main():
     )
 
     parser.add_argument(
-        "--merge-engine",
-        type=str,
-        default="v2like",
-        choices=["classic", "v2like"],
-        help="Graph merge engine: classic or v2like (async candidate verify + repair).",
-    )
-    parser.add_argument(
         "--merge-decisions-log-path",
         type=str,
         default=None,
@@ -300,10 +286,6 @@ def main():
 
         # Инициализация сервисов
         logger.info("Инициализация сервисов...")
-        verification_service = VerificationService(verificator)
-        node_processor = NodeProcessor(verification_service)
-        relation_processor = RelationProcessor()
-
         extraction_service = ExtractionService(
             extractor=extractor,
             extractor_relations=extractor_relations,
@@ -352,68 +334,32 @@ def main():
             )
 
         # Этап 3: Построение графа из результатов экстракции
-        logger.info("Stage 3: build graph (engine=%s)...", args.merge_engine)
-        if args.merge_engine == "v2like":
-            decisions_log_path = (
-                Path(args.merge_decisions_log_path)
-                if args.merge_decisions_log_path
-                else output_path.with_suffix(".merge_decisions.jsonl")
-            )
-            decisions_log_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Stage 3: build graph (engine=v2like)...")
+        decisions_log_path = (
+            Path(args.merge_decisions_log_path)
+            if args.merge_decisions_log_path
+            else output_path.with_suffix(".merge_decisions.jsonl")
+        )
+        decisions_log_path.parent.mkdir(parents=True, exist_ok=True)
 
-            pipeline = VerificationPipelineV2(
-                results_dir=RESULTS_DIR,
-                output_path=output_path,
-                logs_path=decisions_log_path,
-                top_k=max(1, int(args.v2_top_k)),
-                llm_type=args.llm_type,
-                llm_enabled=not args.v2_disable_llm_judge,
-                max_files=chapter_limit if chapter_limit and chapter_limit > 0 else None,
-                enable_bridge_merge=not args.v2_disable_bridge_merge,
-                judge_concurrency=max(1, int(args.v2_judge_concurrency)),
-            )
-            book_graph = pipeline.run()
-            logger.info(
-                "v2like merge completed: nodes=%s relations=%s logs=%s",
-                len(book_graph.nodes.nodes),
-                len(book_graph.relationships.relationships),
-                decisions_log_path,
-            )
-        else:
-            batch_payload_dir = RESULTS_DIR / "_batch_payloads"
-            batch_files = sorted(batch_payload_dir.glob("batch_*.json"))
-            if not batch_files:
-                raise FileNotFoundError(
-                    "Batch payloads are required for merge but were not found in "
-                    f"{batch_payload_dir}"
-                )
-
-            max_batches = None
-            if chapter_limit and chapter_limit > 0:
-                batch_size = max(1, int(EXTRACTION_CHAPTER_BATCH_SIZE))
-                max_batches = max(1, math.ceil(chapter_limit / batch_size))
-
-            batch_builder = BatchGraphBuilder(
-                node_processor=node_processor,
-                relation_processor=relation_processor,
-            )
-            all_book_nodes, relation_graphs, batch_reports = (
-                batch_builder.build_graph_from_batch_payloads(
-                    batch_payload_dir=batch_payload_dir,
-                    max_batches=max_batches,
-                )
-            )
-            logger.info(
-                "Classic merge via batch payloads completed: batches=%s nodes=%s relations=%s",
-                len(batch_reports),
-                len(all_book_nodes.nodes),
-                len(relation_graphs.relationships),
-            )
-            logger.info(
-                f"Graph built: nodes={len(all_book_nodes.nodes)} "
-                f"relations={len(relation_graphs.relationships)}"
-            )
-            book_graph = BookGraph(nodes=all_book_nodes, relationships=relation_graphs)
+        pipeline = VerificationPipelineV2(
+            results_dir=RESULTS_DIR,
+            output_path=output_path,
+            logs_path=decisions_log_path,
+            top_k=max(1, int(args.v2_top_k)),
+            llm_type=args.llm_type,
+            llm_enabled=not args.v2_disable_llm_judge,
+            max_files=chapter_limit if chapter_limit and chapter_limit > 0 else None,
+            enable_bridge_merge=not args.v2_disable_bridge_merge,
+            judge_concurrency=max(1, int(args.v2_judge_concurrency)),
+        )
+        book_graph = pipeline.run()
+        logger.info(
+            "v2like merge completed: nodes=%s relations=%s logs=%s",
+            len(book_graph.nodes.nodes),
+            len(book_graph.relationships.relationships),
+            decisions_log_path,
+        )
 
         baseline_graph = None
         if args.baseline_graph_path:
