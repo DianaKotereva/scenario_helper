@@ -158,12 +158,14 @@ class ExtractionService:
         for node in nodes_in:
             if not isinstance(node, dict):
                 continue
+            raw_classification = node.get("classification")
+            raw_classification = self._normalize_classification(raw_classification)
             nodes.append(
                 {
                     "main_name": str(node.get("main_name", "")).strip(),
                     "alt_names": node.get("alt_names") if isinstance(node.get("alt_names"), list) else [],
                     "actions": self._coerce_evidence_items(node.get("actions"), fallback_source_id),
-                    "classification": node.get("classification"),
+                    "classification": raw_classification,
                 }
             )
 
@@ -174,14 +176,17 @@ class ExtractionService:
             descriptions = rel.get("descriptions")
             if descriptions is None and rel.get("description") is not None:
                 descriptions = rel.get("description")
+            source_node_type = str(rel.get("source_node_type", "")).strip() or "термин"
+            target_node_type = str(rel.get("target_node_type", "")).strip() or "термин"
+            rel_type = str(rel.get("type", "")).strip() or "СВЯЗАНО_С"
 
             relations.append(
                 {
                     "source_node_id": str(rel.get("source_node_id", "")).strip(),
-                    "source_node_type": str(rel.get("source_node_type", "")).strip(),
+                    "source_node_type": source_node_type,
                     "target_node_id": str(rel.get("target_node_id", "")).strip(),
-                    "target_node_type": str(rel.get("target_node_type", "")).strip(),
-                    "type": str(rel.get("type", "")).strip(),
+                    "target_node_type": target_node_type,
+                    "type": rel_type,
                     "descriptions": self._coerce_evidence_items(descriptions, fallback_source_id),
                 }
             )
@@ -191,6 +196,31 @@ class ExtractionService:
             "relations": relations,
             "summarization": str(payload.get("summarization", "") or ""),
         }
+
+    @staticmethod
+    def _normalize_classification(value: Any) -> str:
+        raw = str(value or "").strip().lower().replace("ё", "е")
+        if not raw:
+            return "термин"
+        mapping = {
+            "персонаж": "персонаж",
+            "персонажи": "персонаж",
+            "person": "персонаж",
+            "character": "персонаж",
+            "место": "место",
+            "location": "место",
+            "place": "место",
+            "организация": "организация",
+            "org": "организация",
+            "organization": "организация",
+            "термин": "термин",
+            "term": "термин",
+            "сила природы": "сила природы",
+            "force": "сила природы",
+            "животное": "термин",
+            "зверь": "термин",
+        }
+        return mapping.get(raw, "термин")
 
     @staticmethod
     def _norm_name(name: Any) -> str:
@@ -479,6 +509,63 @@ class ExtractionService:
         return model.dict()
 
     @staticmethod
+    def _validate_node_item(node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            if hasattr(ExtractedNode, "model_validate"):
+                return ExtractedNode.model_validate(node).model_dump(mode="json")
+            return ExtractedNode.parse_obj(node).dict()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _validate_relation_item(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            if hasattr(ExtractedRelation, "model_validate"):
+                return ExtractedRelation.model_validate(rel).model_dump(mode="json")
+            return ExtractedRelation.parse_obj(rel).dict()
+        except Exception:
+            return None
+
+    def _salvage_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Best-effort salvage: keep only individually valid nodes/relations instead of
+        dropping the whole batch when a few items are malformed.
+        """
+        salvaged_nodes: List[Dict[str, Any]] = []
+        for node in payload.get("nodes", []) if isinstance(payload.get("nodes"), list) else []:
+            if not isinstance(node, dict):
+                continue
+            node_copy = dict(node)
+            node_copy["classification"] = self._classification_from_endpoint_type(
+                node_copy.get("classification")
+            )
+            valid_node = self._validate_node_item(node_copy)
+            if valid_node is not None:
+                salvaged_nodes.append(valid_node)
+
+        salvaged_relations: List[Dict[str, Any]] = []
+        for rel in payload.get("relations", []) if isinstance(payload.get("relations"), list) else []:
+            if not isinstance(rel, dict):
+                continue
+            rel_copy = dict(rel)
+            rel_copy["source_node_type"] = (
+                str(rel_copy.get("source_node_type", "")).strip() or "термин"
+            )
+            rel_copy["target_node_type"] = (
+                str(rel_copy.get("target_node_type", "")).strip() or "термин"
+            )
+            rel_copy["type"] = str(rel_copy.get("type", "")).strip() or "СВЯЗАНО_С"
+            valid_rel = self._validate_relation_item(rel_copy)
+            if valid_rel is not None:
+                salvaged_relations.append(valid_rel)
+
+        return {
+            "nodes": salvaged_nodes,
+            "relations": salvaged_relations,
+            "summarization": str(payload.get("summarization", "") or ""),
+        }
+
+    @staticmethod
     def _empty_payload() -> Dict[str, Any]:
         return {"nodes": [], "relations": [], "summarization": ""}
 
@@ -515,21 +602,39 @@ class ExtractionService:
     ) -> Dict[str, Any]:
         retry_limit = max(0, int(EXTRACTION_VALIDATION_RETRY_COUNT or 0))
         current_result = initial_result
+        last_normalized_payload: Optional[Dict[str, Any]] = None
 
         for attempt in range(retry_limit + 1):
             try:
                 normalized = self._normalize_result(current_result, tuple(source_ids))
+                last_normalized_payload = normalized
                 missing_sources = self._find_missing_source_ids_in_payload(
                     payload=normalized,
                     expected_source_ids=source_ids,
                 )
                 if missing_sources:
+                    if attempt >= retry_limit:
+                        logger.warning(
+                            "Extraction source coverage still missing after retries: batch=%s source_ids=%s missing=%s. Keeping partial payload.",
+                            batch_idx,
+                            source_ids,
+                            missing_sources,
+                        )
+                        return normalized
                     raise ValueError(
                         f"Extraction source coverage missing for source_ids={missing_sources}"
                     )
                 return normalized
             except Exception as ex:
                 if attempt >= retry_limit:
+                    if last_normalized_payload is not None:
+                        logger.warning(
+                            "Extraction validation failed after retries, keeping last normalized payload: batch=%s source_ids=%s error=%s",
+                            batch_idx,
+                            source_ids,
+                            ex,
+                        )
+                        return last_normalized_payload
                     logger.warning(
                         "Extraction validation failed after retries: batch=%s source_ids=%s error=%s",
                         batch_idx,
@@ -542,6 +647,18 @@ class ExtractionService:
                         raw_result=current_result,
                         error_text=str(ex),
                     )
+                    raw_payload = self._as_dict(current_result)
+                    if isinstance(raw_payload, dict):
+                        coerced = self._coerce_payload_schema(raw_payload, tuple(source_ids))
+                        salvaged = self._salvage_payload(coerced)
+                        logger.warning(
+                            "Using salvaged payload after validation retries: batch=%s source_ids=%s nodes=%s relations=%s",
+                            batch_idx,
+                            source_ids,
+                            len(salvaged.get("nodes", [])),
+                            len(salvaged.get("relations", [])),
+                        )
+                        return salvaged
                     return self._empty_payload()
 
                 logger.warning(
