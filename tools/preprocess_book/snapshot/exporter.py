@@ -34,6 +34,15 @@ def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
+def _strip_cluster_suffix(name: str) -> str:
+    """Remove technical cluster suffixes like '__c000123' from entity labels."""
+    return re.sub(r"__c\d+$", "", (name or "").strip())
+
+
+def _normalize_name_key(name: str) -> str:
+    return _normalize_whitespace(name).lower()
+
+
 def _to_jsonable(obj: Any) -> Any:
     if is_dataclass(obj):
         data = asdict(obj)
@@ -380,8 +389,10 @@ def _extract_merged_entities_and_relations(
     entities: List[EntityRecord] = []
     relations: List[RelationRecord] = []
     entity_index: List[EntityChapterIndexRecord] = []
+    alias_to_main: Dict[str, str] = {}
 
     for node in merged_graph.nodes.nodes.values():
+        main_name = _strip_cluster_suffix(node.main_name)
         per_chapter: Dict[int, List[str]] = {}
         for action in node.actions or []:
             action_text = _normalize_whitespace(getattr(action, "action", ""))
@@ -404,17 +415,29 @@ def _extract_merged_entities_and_relations(
         ]
         mentions_count = sum(len(v) for v in per_chapter.values())
         entity_payload = {
-            "main_name": node.main_name,
+            "main_name": main_name,
             "classification": node.classification,
             "chapter_ids": chapter_ids,
-            "alt_names": sorted(node.alt_names or []),
+            "alt_names": sorted(_strip_cluster_suffix(v) for v in (node.alt_names or []) if str(v).strip()),
         }
         entity_id = _stable_id("merged_ent", entity_payload)
+        alt_names = sorted(
+            {
+                _strip_cluster_suffix(str(v).strip())
+                for v in (node.alt_names or [])
+                if _strip_cluster_suffix(str(v).strip())
+            }
+        )
+        # Build lookup for relation endpoint canonicalization.
+        for candidate in [main_name, node.main_name, *alt_names, *(node.alt_names or [])]:
+            key = _normalize_name_key(_strip_cluster_suffix(str(candidate)))
+            if key and key not in alias_to_main:
+                alias_to_main[key] = main_name
         entities.append(
             EntityRecord(
                 entity_id=entity_id,
-                main_name=node.main_name,
-                alt_names=list(node.alt_names or []),
+                main_name=main_name,
+                alt_names=alt_names,
                 classification=node.classification,
                 chapter_ids=chapter_ids,
                 source_ids=list(chapter_ids),
@@ -426,17 +449,24 @@ def _extract_merged_entities_and_relations(
         entity_index.append(
             EntityChapterIndexRecord(
                 entity_id=entity_id,
-                main_name=node.main_name,
+                main_name=main_name,
                 chapters=chapter_ids,
-                aliases=list(node.alt_names or []),
+                aliases=alt_names,
                 mentions_count=mentions_count,
                 metadata={"origin": "merged_graph"},
             )
         )
 
+    def _canonicalize_endpoint(name: str) -> str:
+        raw = _normalize_whitespace(str(name))
+        if not raw:
+            return raw
+        stripped = _strip_cluster_suffix(raw)
+        return alias_to_main.get(_normalize_name_key(stripped), stripped)
+
     for edge in merged_graph.relationships.relationships.values():
-        source = edge.object_1
-        target = edge.object_2
+        source = _canonicalize_endpoint(edge.object_1)
+        target = _canonicalize_endpoint(edge.object_2)
         for desc in edge.description:
             source_ids = [int(v) for v in (desc.source_id or ()) if isinstance(v, int)]
             chapter_ref = source_ids[0] if source_ids else None
