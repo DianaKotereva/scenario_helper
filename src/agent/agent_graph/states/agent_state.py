@@ -24,3 +24,4 @@ class AgentState(TypedDict):
     route_reason: str
     final_ready: bool
     last_tool_name: Optional[str]
+    last_tool_result: Dict[str, Any]

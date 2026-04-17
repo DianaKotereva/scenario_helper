@@ -34,12 +34,64 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _read_first_existing_jsonl(paths: List[Path]) -> List[Dict[str, Any]]:
+    for path in paths:
+        rows = _read_jsonl(path)
+        if rows:
+            return rows
+    return []
+
+
+def _resolve_snapshot_dir(snapshot_dir: Optional[str]) -> Path:
+    if snapshot_dir:
+        return Path(snapshot_dir)
+
+    configured = Path(settings.SNAPSHOT_DIR)
+    if configured.exists():
+        has_entities = bool(
+            _read_first_existing_jsonl(
+                [configured / "entities_merged.jsonl", configured / "entities.jsonl"]
+            )
+        )
+        has_relations = bool(
+            _read_first_existing_jsonl(
+                [configured / "relations_merged.jsonl", configured / "relations.jsonl"]
+            )
+        )
+        has_chapters = bool(_read_jsonl(configured / "chapters.jsonl"))
+        if has_entities and has_relations and has_chapters:
+            return configured
+        logger.warning(
+            "Configured SNAPSHOT_DIR=%s is present but empty/incomplete, fallback to latest processed_data snapshot",
+            configured,
+        )
+
+    processed_data = Path("processed_data")
+    if not processed_data.exists():
+        return configured
+
+    candidates = sorted(
+        [
+            d / "snapshot"
+            for d in processed_data.iterdir()
+            if d.is_dir() and (d / "snapshot").exists()
+        ],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else configured
+
+
 @lru_cache(maxsize=2)
 def load_snapshot(snapshot_dir: str) -> Dict[str, List[Dict[str, Any]]]:
-    base = Path(snapshot_dir)
+    base = _resolve_snapshot_dir(snapshot_dir)
     data = {
-        "entities_merged": _read_jsonl(base / "entities_merged.jsonl"),
-        "relations_merged": _read_jsonl(base / "relations_merged.jsonl"),
+        "entities_merged": _read_first_existing_jsonl(
+            [base / "entities_merged.jsonl", base / "entities.jsonl"]
+        ),
+        "relations_merged": _read_first_existing_jsonl(
+            [base / "relations_merged.jsonl", base / "relations.jsonl"]
+        ),
         "chapters": _read_jsonl(base / "chapters.jsonl"),
     }
     logger.info(
@@ -83,7 +135,7 @@ def guided_deterministic_search(
     """
     hints = input_hints or {}
     query_tokens = _tokenize(query)
-    snapshot = load_snapshot(snapshot_dir or settings.SNAPSHOT_DIR)
+    snapshot = load_snapshot(snapshot_dir if snapshot_dir else "")
 
     max_entities = max_entities or settings.PHASE_B_MAX_ENTITIES
     max_relations = max_relations or settings.PHASE_B_MAX_RELATIONS

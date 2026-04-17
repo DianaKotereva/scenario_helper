@@ -54,6 +54,7 @@ def _initialize_default_values(state: AgentState) -> AgentState:
         "route_reason": "",
         "final_ready": False,
         "last_tool_name": None,
+        "last_tool_result": {},
         "next_step": NextStep.SEARCH.value,
     }
 
@@ -220,7 +221,7 @@ def tool_exec_node(state: AgentState) -> AgentState:
             "error": str(exc),
         }
 
-    state["_last_tool_result"] = result
+    state["last_tool_result"] = result
     state["last_tool_name"] = tool_name
     state["react_iteration"] = int(state.get("react_iteration", 0)) + 1
     state["pending_tool_call"] = {}
@@ -251,7 +252,8 @@ def _append_context_from_tool(state: AgentState, tool_name: str, context: Dict[s
 def observe_node(state: AgentState) -> AgentState:
     state = _initialize_default_values(state)
 
-    result = state.pop("_last_tool_result", None)
+    result = state.get("last_tool_result")
+    state["last_tool_result"] = {}
     if not isinstance(result, dict):
         return state
 

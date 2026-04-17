@@ -113,12 +113,57 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
     return rows
 
 
+def _read_first_existing_jsonl(paths: List[Path]) -> List[Dict[str, Any]]:
+    for path in paths:
+        rows = _read_jsonl(path)
+        if rows:
+            return rows
+    return []
+
+
+def _resolve_snapshot_dir(snapshot_dir: Optional[str]) -> Path:
+    if snapshot_dir:
+        return Path(snapshot_dir)
+
+    configured = Path(settings.SNAPSHOT_DIR)
+    if configured.exists():
+        has_index = bool(_read_jsonl(configured / "entity_chapter_index.jsonl"))
+        has_relations = bool(
+            _read_first_existing_jsonl(
+                [configured / "relations_merged.jsonl", configured / "relations.jsonl"]
+            )
+        )
+        if has_index and has_relations:
+            return configured
+        logger.warning(
+            "Configured SNAPSHOT_DIR=%s is present but empty/incomplete, fallback to latest processed_data snapshot",
+            configured,
+        )
+
+    processed_data = Path("processed_data")
+    if not processed_data.exists():
+        return configured
+
+    candidates = sorted(
+        [
+            d / "snapshot"
+            for d in processed_data.iterdir()
+            if d.is_dir() and (d / "snapshot").exists()
+        ],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else configured
+
+
 @lru_cache(maxsize=2)
 def _load_snapshot_indexes(snapshot_dir: str) -> Dict[str, List[Dict[str, Any]]]:
-    base = Path(snapshot_dir)
+    base = _resolve_snapshot_dir(snapshot_dir)
     return {
         "entity_chapter_index": _read_jsonl(base / "entity_chapter_index.jsonl"),
-        "relations_merged": _read_jsonl(base / "relations_merged.jsonl"),
+        "relations_merged": _read_first_existing_jsonl(
+            [base / "relations_merged.jsonl", base / "relations.jsonl"]
+        ),
     }
 
 
@@ -131,7 +176,7 @@ def search_entity_chapter_index(
     """
     Поиск кандидатов по entity_chapter_index для guided deterministic retrieval.
     """
-    snapshot = _load_snapshot_indexes(snapshot_dir or settings.SNAPSHOT_DIR)
+    snapshot = _load_snapshot_indexes(snapshot_dir if snapshot_dir else "")
     rows = snapshot["entity_chapter_index"]
     hinted = {x for x in (hinted_entity_ids or []) if isinstance(x, str)}
     q_tokens = _tokenize(query)
@@ -187,7 +232,7 @@ def traverse_relations_for_entities(
     Ограниченный traversal по relations_merged:
     оставляем ребра, где хотя бы одна сторона в релевантных сущностях.
     """
-    snapshot = _load_snapshot_indexes(snapshot_dir or settings.SNAPSHOT_DIR)
+    snapshot = _load_snapshot_indexes(snapshot_dir if snapshot_dir else "")
     relations = snapshot["relations_merged"]
     names = {n.lower() for n in entity_names if isinstance(n, str) and n.strip()}
 

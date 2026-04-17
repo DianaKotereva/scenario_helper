@@ -211,28 +211,41 @@ class RetrieveAgent(LLMBase):
         nodes_result: List[Document]
     ) -> Dict[str, str]:
         """
-        Обрабатывает результаты поиска из графа знаний.
-        
-        Извлекает имена узлов и отношений из метаданных документов,
-        обрабатывает их и возвращает текстовые описания.
-        
-        Args:
-            rels_result: Список документов с результатами поиска отношений
-            nodes_result: Список документов с результатами поиска узлов
-            
-        Returns:
-            Словарь с ключами "nodes_texts" и "rel_texts"
+        ???????????? ?????????? ?????? ?? ????? ??????.
+
+        ?????????? ????????? ????? ?? ????? ? ??????????.
         """
+        # Primary path: use retrieved graph docs directly.
+        # This prevents false "not found in graph, skipping" when vector docs
+        # and in-memory graph keys diverge by normalization/version.
         try:
-            # Извлекаем имена узлов
+            node_chunks = [
+                str(doc.page_content).strip()
+                for doc in nodes_result
+                if hasattr(doc, "page_content") and str(doc.page_content).strip()
+            ]
+            rel_chunks = [
+                str(doc.page_content).strip()
+                for doc in rels_result
+                if hasattr(doc, "page_content") and str(doc.page_content).strip()
+            ]
+            if node_chunks or rel_chunks:
+                return {
+                    "nodes_texts": "\n***\n".join(node_chunks),
+                    "rel_texts": "\n***\n".join(rel_chunks),
+                }
+        except Exception as e:
+            logger.warning("Direct graph-doc formatting failed: %s", e, exc_info=True)
+
+        # Fallback path: legacy lookup by metadata names in in-memory graph.
+        try:
             nodes_names: Set[str] = set()
             for doc in nodes_result:
                 if hasattr(doc, 'metadata') and "name" in doc.metadata:
                     name = doc.metadata["name"]
                     if isinstance(name, str):
                         nodes_names.add(name)
-            
-            # Извлекаем имена отношений
+
             rel_names: Set[Tuple[str, str]] = set()
             for doc in rels_result:
                 if hasattr(doc, 'metadata') and "name" in doc.metadata:
@@ -241,18 +254,15 @@ class RetrieveAgent(LLMBase):
                         rel_names.add(name)
                     elif isinstance(name, (list, tuple)) and len(name) >= 2:
                         rel_names.add((name[0], name[1]))
-            
-            # Добавляем узлы из отношений
+
             for rel_name in rel_names:
                 nodes_names.add(rel_name[0])
                 nodes_names.add(rel_name[1])
-            
-            # Обрабатываем узлы и отношения
+
             node_text = self.process_nodes(nodes_names)
             rels_text = self.process_rels(rel_names)
-            
             return {"nodes_texts": node_text, "rel_texts": rels_text}
-            
+
         except Exception as e:
             logger.error(f"Error processing graph results: {e}", exc_info=True)
             return {"nodes_texts": "", "rel_texts": ""}
