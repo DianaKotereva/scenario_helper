@@ -70,6 +70,45 @@ KINSHIP_ALIAS_PREFIXES = (
     "внук ",
     "внучка ",
 )
+ROLE_LIKE_TOKENS = {
+    "отец",
+    "мать",
+    "сын",
+    "дочь",
+    "внук",
+    "внучка",
+    "мальчик",
+    "девочка",
+    "ребёнок",
+    "ребенок",
+    "жена",
+    "муж",
+    "невеста",
+    "жених",
+    "король",
+    "королева",
+    "принц",
+    "принцесса",
+    "мачеха",
+    "будущий",
+    "будущая",
+    "будущее",
+}
+ROLE_LIKE_PREFIXES = (
+    "сын ",
+    "дочь ",
+    "отец ",
+    "мать ",
+    "внук ",
+    "внучка ",
+    "будущий ",
+    "будущая ",
+    "будущее ",
+    "моя ",
+    "мой ",
+    "мальчик",
+    "девочка",
+)
 
 
 class VerificationPipelineV2:
@@ -86,6 +125,7 @@ class VerificationPipelineV2:
         judge_concurrency: int = 6,
         strict_source_coverage: bool | None = None,
         strict_extraction_coverage: bool | None = None,
+        repair_exact_name_only: bool = True,
     ):
         self.results_dir = results_dir
         self.output_path = output_path
@@ -106,6 +146,7 @@ class VerificationPipelineV2:
             else os.getenv("V2_STRICT_EXTRACTION_COVERAGE", "false").lower()
             in {"1", "true", "yes", "on"}
         )
+        self.repair_exact_name_only = bool(repair_exact_name_only)
 
         self.selector = CandidateSelector(top_k=top_k)
         self.cluster_manager = ClusterManager()
@@ -259,6 +300,8 @@ class VerificationPipelineV2:
     def _hard_negative_reason(cluster_a, cluster_b) -> str | None:
         sig_a = VerificationPipelineV2._cluster_kinship_signature(cluster_a)
         sig_b = VerificationPipelineV2._cluster_kinship_signature(cluster_b)
+        name_a = normalize_text(cluster_a.canonical_name)
+        name_b = normalize_text(cluster_b.canonical_name)
 
         # Different parent anchors for same kinship role.
         if (
@@ -288,8 +331,66 @@ class VerificationPipelineV2:
             sig_b["child_of"], sig_a["parent_of"]
         ):
             return "hard_negative:child_parent_cycle"
+        # Direct parent-child contradiction by canonical names.
+        if name_a and name_a in sig_b["child_of"]:
+            return "hard_negative:canonical_child_parent_cycle"
+        if name_b and name_b in sig_a["child_of"]:
+            return "hard_negative:canonical_child_parent_cycle"
 
         return None
+
+    @staticmethod
+    def _is_role_like_label(value: str) -> bool:
+        norm = normalize_text(value)
+        if not norm:
+            return False
+        if any(norm.startswith(prefix) for prefix in ROLE_LIKE_PREFIXES):
+            return True
+        tokens = [t for t in norm.split(" ") if t]
+        if len(tokens) == 1 and tokens[0] in ROLE_LIKE_TOKENS:
+            return True
+        return False
+
+    @staticmethod
+    def _strong_alias_set(cluster) -> set[str]:
+        values = {normalize_text(cluster.canonical_name)}
+        values.update(normalize_text(v) for v in getattr(cluster, "alt_names", []))
+        values.update(normalize_text(v) for v in getattr(cluster, "kinship_aliases", []))
+        filtered: set[str] = set()
+        for value in values:
+            if not value:
+                continue
+            if VerificationPipelineV2._is_role_like_label(value):
+                continue
+            filtered.add(value)
+        return filtered
+
+    @staticmethod
+    def _passes_non_identical_name_guard(cluster_a, cluster_b, cand: RepairCandidate) -> bool:
+        name_a = normalize_text(cluster_a.canonical_name)
+        name_b = normalize_text(cluster_b.canonical_name)
+        if not name_a or not name_b or name_a == name_b:
+            return True
+
+        # Do not merge explicit role labels into canonical entities.
+        if VerificationPipelineV2._is_role_like_label(cluster_a.canonical_name):
+            return False
+        if VerificationPipelineV2._is_role_like_label(cluster_b.canonical_name):
+            return False
+
+        aliases_a = VerificationPipelineV2._strong_alias_set(cluster_a)
+        aliases_b = VerificationPipelineV2._strong_alias_set(cluster_b)
+        explicit_bridge = (name_a in aliases_b) or (name_b in aliases_a)
+        lexical_similarity = SequenceMatcher(None, name_a, name_b).ratio()
+
+        # Accept non-identical names only with strong evidence.
+        if explicit_bridge:
+            return True
+        if lexical_similarity >= 0.92:
+            return True
+        if cand.alias_score >= 0.60 and cand.mention_score >= 1.0:
+            return True
+        return False
 
     @staticmethod
     def _is_generic_main_name(main_name: str) -> bool:
@@ -639,9 +740,24 @@ class VerificationPipelineV2:
                 "reason": "classification_mismatch",
                 "candidate": cand,
             }
+        if self.repair_exact_name_only:
+            name_a = normalize_text(ca.canonical_name)
+            name_b = normalize_text(cb.canonical_name)
+            if name_a != name_b:
+                return {
+                    "skip": True,
+                    "reason": "hard_negative:repair_exact_name_only",
+                    "candidate": cand,
+                }
         hard_negative_reason = self._hard_negative_reason(ca, cb)
         if hard_negative_reason:
             return {"skip": True, "reason": hard_negative_reason, "candidate": cand}
+        if not self._passes_non_identical_name_guard(ca, cb, cand):
+            return {
+                "skip": True,
+                "reason": "hard_negative:non_identical_name_guard",
+                "candidate": cand,
+            }
 
         async with self._judge_semaphore:
             judge = await self.judge.verify_async(
