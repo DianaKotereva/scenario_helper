@@ -219,7 +219,11 @@ class DocumentPreparer:
         logger.debug(f"Извлечено {len(chapters)} глав из {len(documents)} документов")
         return chapters
     
-    def split_to_small_chunks(self, documents: List[Document]) -> List[Document]:
+    def split_to_small_chunks(
+        self,
+        documents: List[Document],
+        include_chapters: bool = False,
+    ) -> List[Document]:
         """
         Разбивает документы на более мелкие чанки по токенам.
         
@@ -232,11 +236,15 @@ class DocumentPreparer:
         Returns:
             Список Document объектов с разбитыми текстами
         """
-        # Исключаем главы из разбиения
-        documents_to_split = [
-            doc for doc in documents
-            if not (doc.metadata.get("source") == "book" and isinstance(doc.metadata.get("source_id"), int))
-        ]
+        # По умолчанию главы исключаются из разбиения (историческое поведение),
+        # но при include_chapters=True разбиваем всё, кроме атомарных граф-документов.
+        if include_chapters:
+            documents_to_split = list(documents)
+        else:
+            documents_to_split = [
+                doc for doc in documents
+                if not (doc.metadata.get("source") == "book" and isinstance(doc.metadata.get("source_id"), int))
+            ]
         
         logger.info(f"Разбиение {len(documents_to_split)} документов на чанки по {self.chunk_size} токенов...")
         split_docs = split_documents(documents_to_split, chunk_size=self.chunk_size)

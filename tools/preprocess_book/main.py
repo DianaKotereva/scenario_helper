@@ -10,9 +10,11 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
+from langchain_core.documents import Document
 from langchain_core.output_parsers import JsonOutputParser
 from tools.preprocess_book.config.preprocess_settings import (
     OUTPUT_DIR,
@@ -29,6 +31,7 @@ from tools.preprocess_book.load_to_vectorstore import (
     DocumentPreparer,
     VectorStoreLoader,
 )
+from tools.preprocess_book.load_to_vectorstore.chunk_splitter import split_text
 from tools.preprocess_book.load_to_vectorstore.quality_gates import (
     expected_graph_fact_counts,
     validate_chapters,
@@ -43,6 +46,7 @@ from tools.preprocess_book.make_summaries import (
 from tools.preprocess_book.make_graph.v2_quality_gates import evaluate_merge_quality
 from tools.preprocess_book.make_graph.v2_verification_pipeline import VerificationPipelineV2
 from tools.preprocess_book.prompts.extract_names import ExtractNames
+from tools.preprocess_book.prompts.extract_missing_nodes import ExtractMissingNodes
 from tools.preprocess_book.prompts.extract_relations import ExtractRelations
 from tools.preprocess_book.prompts.verificator import Verification
 from tools.preprocess_book.storage.storage import FileManager
@@ -105,6 +109,65 @@ def _detect_changed_source_ids(current_hashes, previous_hashes):
     }
     removed = {int(sid) for sid in previous_keys - {str(i) for i in current_keys}}
     return sorted(changed | removed)
+
+
+def _build_small_chunks_from_source_chapters(
+    texts,
+    token_chunk_size: int = 512,
+):
+    rows = []
+    for doc in texts:
+        sid = doc.metadata.get("source_id")
+        if not isinstance(sid, int):
+            continue
+        cid = int(doc.metadata.get("chapter_id", sid))
+        chapter_text = str(doc.page_content or "")
+        chunks = split_text(chapter_text, chunk_size=max(32, int(token_chunk_size)))
+        for idx, chunk_text in enumerate(chunks):
+            rows.append(
+                {
+                    "chunk_id": f"ch{sid}_{idx}",
+                    "text": chunk_text,
+                    "source_id": sid,
+                    "chapter_id": cid,
+                    "metadata": {
+                        "chunk_index": idx,
+                        "token_chunk_size": int(token_chunk_size),
+                        "origin": "split_book_source_id_then_512tok",
+                    },
+                }
+            )
+    return rows
+
+
+def _write_jsonl(rows, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _verification_chunks_to_documents(rows) -> list[Document]:
+    docs: list[Document] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = row.get("source_id")
+        chapter_id = row.get("chapter_id", source_id)
+        text = str(row.get("text", "") or "")
+        chunk_id = str(row.get("chunk_id", "") or "")
+        if not isinstance(source_id, int) or not text:
+            continue
+        metadata = {
+            "source": "book",
+            "source_id": int(source_id),
+            "chapter_id": int(chapter_id) if isinstance(chapter_id, int) else int(source_id),
+            "chunk_id": chunk_id,
+            "doc_uid": f"book_chunk::{chunk_id or source_id}",
+            "origin": "verification_chunks",
+        }
+        docs.append(Document(page_content=text, metadata=metadata))
+    return docs
 
 
 def main():
@@ -202,6 +265,12 @@ def main():
     )
 
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=PARALLEL_CONCURRENCY,
+        help="Единый лимит параллелизма для экстракции и верификации (judge).",
+    )
+    parser.add_argument(
         "--merge-decisions-log-path",
         type=str,
         default=None,
@@ -216,8 +285,8 @@ def main():
     parser.add_argument(
         "--v2-judge-concurrency",
         type=int,
-        default=6,
-        help="Async LLM judge concurrency for v2like merge.",
+        default=None,
+        help="Async LLM judge concurrency for v2like merge (по умолчанию = --concurrency).",
     )
     parser.add_argument(
         "--v2-disable-llm-judge",
@@ -228,6 +297,18 @@ def main():
         "--v2-disable-bridge-merge",
         action="store_true",
         help="Disable repair/bridge merge pass in v2like merge.",
+    )
+    parser.add_argument(
+        "--v2-verification-last-n",
+        type=int,
+        default=None,
+        help="(legacy) How many last actions of existing entity to pass into merge verifier (negative = take from tail, 0 = full list).",
+    )
+    parser.add_argument(
+        "--v2-verification-last-actions",
+        type=int,
+        default=50,
+        help="Количество последних действий в биографии для верификации (по умолчанию 50).",
     )
     parser.add_argument(
         "--baseline-graph-path",
@@ -272,6 +353,18 @@ def main():
         chapter_limit = args.max_chapters
         logger.info("Chapter limit enabled: %s", chapter_limit)
 
+    run_concurrency = max(1, int(args.concurrency or 1))
+    judge_concurrency = (
+        max(1, int(args.v2_judge_concurrency))
+        if args.v2_judge_concurrency is not None
+        else run_concurrency
+    )
+    verification_last_n = (
+        int(args.v2_verification_last_n)
+        if args.v2_verification_last_n is not None
+        else -max(1, int(args.v2_verification_last_actions))
+    )
+
     try:
         # Инициализация LLM
         logger.info("Инициализация LLM...")
@@ -281,6 +374,7 @@ def main():
         logger.info("Создание промптов...")
         json_parser = JsonOutputParser()
         extractor = ExtractNames(llm=llm)
+        extractor_missing_nodes = ExtractMissingNodes(llm=llm)
         extractor_relations = ExtractRelations(llm=llm)
         verificator = Verification(llm=llm, parser=json_parser)
 
@@ -289,20 +383,37 @@ def main():
         extraction_service = ExtractionService(
             extractor=extractor,
             extractor_relations=extractor_relations,
+            extractor_missing_nodes=extractor_missing_nodes,
         )
 
         # Этап 1: Загрузка и разбиение книги на ГЛАВЫ
         # Важно: разбиение происходит на главы (большие части по разделителям),
         # а не на маленькие чанки. Маленькие чанки создаются только для vectorstore.
-        texts = None
+        logger.info("Этап 1: Загрузка и разбиение книги на главы...")
+        book_text = load_book(book_path)
+        # split_book по умолчанию разбивает на главы (split_into_chunks=False)
+        texts = split_book(book_text)
+        if chapter_limit:
+            texts = texts[:chapter_limit]
+        logger.info(f"Книга разбита на {len(texts)} глав")
+
+        # Small chunks для сниппетов/верификации (и downstream OpenSearch):
+        # source_id строго наследуется из split_book.
+        verification_chunks_dir = RESULTS_DIR / "_verification_chunks"
+        verification_chunks_path = verification_chunks_dir / "chunks_source_split_512tok.jsonl"
+        verification_chunks = _build_small_chunks_from_source_chapters(
+            texts=texts,
+            token_chunk_size=512,
+        )
+        _write_jsonl(verification_chunks, verification_chunks_path)
+        os.environ["VERIFICATION_CHUNKS_JSONL_PATH"] = str(verification_chunks_path)
+        logger.info(
+            "Verification chunks prepared: %s chunks=%s",
+            verification_chunks_path,
+            len(verification_chunks),
+        )
+
         if not args.skip_extraction:
-            logger.info("Этап 1: Загрузка и разбиение книги на главы...")
-            book_text = load_book(book_path)
-            # split_book по умолчанию разбивает на главы (split_into_chunks=False)
-            texts = split_book(book_text)
-            if chapter_limit:
-                texts = texts[:chapter_limit]
-            logger.info(f"Книга разбита на {len(texts)} глав")
             # Этап 1.5: Создание суммаризаций (если запрошено)
             if args.create_summaries:
                 logger.info("Этап 1.5: Создание суммаризаций глав...")
@@ -325,7 +436,7 @@ def main():
             # Этап 2: Экстракция данных из глав книги
             logger.info("Этап 2: Экстракция сущностей и отношений из глав книги...")
             extraction_outputs = extraction_service.extract_from_texts(
-                texts, concurrency=PARALLEL_CONCURRENCY
+                texts, concurrency=run_concurrency
             )
             logger.info(f"Обработано {len(extraction_outputs)} глав")
         else:
@@ -351,7 +462,8 @@ def main():
             llm_enabled=not args.v2_disable_llm_judge,
             max_files=chapter_limit if chapter_limit and chapter_limit > 0 else None,
             enable_bridge_merge=not args.v2_disable_bridge_merge,
-            judge_concurrency=max(1, int(args.v2_judge_concurrency)),
+            judge_concurrency=judge_concurrency,
+            verification_last_n=verification_last_n,
         )
         book_graph = pipeline.run()
         logger.info(
@@ -467,9 +579,17 @@ def main():
                     f"Найдено {len(chapters)} глав и {len(other_documents)} других документов"
                 )
 
-                # Разбиваем на мелкие чанки только остальные документы (не главы)
-                logger.info("Разбиение документов (кроме глав) на мелкие чанки...")
-                split_docs = preparer.split_to_small_chunks(other_documents)
+                # Важно: для глав книги переиспользуем те же chunks, что и для snippets/verification.
+                # Это исключает расхождение между verification chunks и index chunks.
+                logger.info(
+                    "Разбиение документов на чанки: главы из verification_chunks, прочее через splitter..."
+                )
+                split_other_docs = preparer.split_to_small_chunks(
+                    other_documents,
+                    include_chapters=False,
+                )
+                chapter_chunk_docs = _verification_chunks_to_documents(verification_chunks)
+                split_docs = split_other_docs + chapter_chunk_docs
                 split_gate_stats = validate_non_chapter_documents(split_docs)
                 logger.info("Split documents quality gate passed: %s", split_gate_stats)
 

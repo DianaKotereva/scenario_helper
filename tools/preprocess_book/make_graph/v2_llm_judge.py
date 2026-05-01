@@ -15,8 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class LLMJudge:
-    def __init__(self, llm_type: str | None = None, enabled: bool = True):
+    def __init__(
+        self,
+        llm_type: str | None = None,
+        enabled: bool = True,
+        verification_last_n: int = -50,
+    ):
         self.enabled = enabled
+        self.verification_last_n = int(verification_last_n)
         self._verifier = None
         if enabled:
             llm = create_llm(llm_type=llm_type)
@@ -47,6 +53,9 @@ class LLMJudge:
             "502",
             "503",
             "504",
+            "invalid json output",
+            "output_parsing_failure",
+            "jsondecodeerror",
         ]
         return any(m in text for m in markers)
 
@@ -99,12 +108,31 @@ class LLMJudge:
             "merge_blocked_by": "unexpected_verifier_output",
         }
 
+    @staticmethod
+    def _fail_closed_payload(reason: str, err: Exception | None = None) -> Dict[str, Any]:
+        evidence = [reason]
+        if err is not None:
+            evidence.append(f"{type(err).__name__}: {err}")
+        return {
+            "is_same_entity": False,
+            "confidence": "low",
+            "key_evidence": evidence,
+            "conflicting_attributes": [],
+            "hard_conflict_flags": ["judge_fail_closed"],
+            "kinship_anchors": {
+                "child_of": [],
+                "parent_of": [],
+                "grandchild_of": [],
+            },
+            "merge_blocked_by": "judge_output_parse_error",
+        }
+
     def _invoke_once(self, cluster, new_node: Dict[str, Any], source_id: Tuple[int, ...]) -> Dict[str, Any]:
         payload = self._verifier.invoke(
             node=self._cluster_to_book_node(cluster),
             new_node=new_node,
             source_id=source_id,
-            last_n=-12,
+            last_n=self.verification_last_n,
             existing_kinship_aliases=list(getattr(cluster, "kinship_aliases", [])),
             new_kinship_aliases=list(new_node.get("kinship_aliases", []) or []),
         )
@@ -142,21 +170,16 @@ class LLMJudge:
                     )
                     time.sleep(delay)
                     continue
-                raise
+                logger.error(
+                    "LLM judge verify failed after retries (sync). Using fail-closed decision. error=%s",
+                    err,
+                )
+                return self._fail_closed_payload(
+                    "LLM judge failed after retries (sync)",
+                    err,
+                )
 
-        return {
-            "is_same_entity": False,
-            "confidence": "low",
-            "key_evidence": ["Judge failed after retries"],
-            "conflicting_attributes": [],
-            "hard_conflict_flags": [],
-            "kinship_anchors": {
-                "child_of": [],
-                "parent_of": [],
-                "grandchild_of": [],
-            },
-            "merge_blocked_by": "judge_failed_after_retries",
-        }
+        return self._fail_closed_payload("LLM judge failed after retries (sync)")
 
     async def verify_async(
         self,
@@ -195,18 +218,13 @@ class LLMJudge:
                     )
                     await asyncio.sleep(delay)
                     continue
-                raise
+                logger.error(
+                    "LLM judge verify failed after retries (async). Using fail-closed decision. error=%s",
+                    err,
+                )
+                return self._fail_closed_payload(
+                    "LLM judge failed after retries (async)",
+                    err,
+                )
 
-        return {
-            "is_same_entity": False,
-            "confidence": "low",
-            "key_evidence": ["Judge failed after retries"],
-            "conflicting_attributes": [],
-            "hard_conflict_flags": [],
-            "kinship_anchors": {
-                "child_of": [],
-                "parent_of": [],
-                "grandchild_of": [],
-            },
-            "merge_blocked_by": "judge_failed_after_retries",
-        }
+        return self._fail_closed_payload("LLM judge failed after retries (async)")
