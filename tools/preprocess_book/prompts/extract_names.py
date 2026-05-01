@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -155,14 +156,63 @@ class ExtractNames(LLMBase):
         text: str,
         source_id: Any = None,
         chapter_blocks: Optional[Sequence[Dict[str, Any]]] = None,
+        required_mentions: Optional[Sequence[str]] = None,
+        existing_nodes: Optional[Sequence[Dict[str, Any]]] = None,
+        retry_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         source_ids = self._to_source_ids(source_id)
         text_payload = (
             self._render_chapter_blocks(chapter_blocks) if chapter_blocks else text
         )
 
+        mentions_payload: List[str] = []
+        if required_mentions:
+            seen: set[str] = set()
+            for mention in required_mentions:
+                val = str(mention or "").strip()
+                if not val:
+                    continue
+                key = val.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                mentions_payload.append(val)
+
         if source_ids:
-            user_prompt = f"source_ids: {source_ids}\\nТекст: {text_payload}"
+            user_prompt = f"source_ids: {source_ids}\nText: {text_payload}"
         else:
-            user_prompt = f"Текст: {text_payload}"
+            user_prompt = f"Text: {text_payload}"
+
+        if retry_mode == "add_missing_only" and mentions_payload:
+            user_prompt += (
+                "\n\nRetry task: add only missing entities to nodes. "
+                "Do not delete or rewrite already extracted entities."
+            )
+
+        if existing_nodes:
+            compact_nodes = []
+            for node in existing_nodes:
+                if not isinstance(node, dict):
+                    continue
+                compact_nodes.append(
+                    {
+                        "main_name": node.get("main_name", ""),
+                        "alt_names": node.get("alt_names", []),
+                        "classification": node.get("classification", ""),
+                    }
+                )
+            if compact_nodes:
+                user_prompt += (
+                    "\n\nAlready extracted nodes (context, do not remove): "
+                    f"{json.dumps(compact_nodes, ensure_ascii=False)}"
+                )
+
+        if mentions_payload:
+            user_prompt += (
+                "\n\nRequired mentions for coverage check: "
+                f"{mentions_payload}\n"
+                "If these entities are truly present in the text, include each of them "
+                "at least once in main_name or alt_names. Do not invent entities."
+            )
+
         return {"messages": [("user", user_prompt)]}

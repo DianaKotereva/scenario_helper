@@ -6,7 +6,9 @@
 """
 
 import logging
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Optional, Set, Tuple, List
 
 from langchain_core.documents import Document
@@ -21,7 +23,7 @@ from src.llm_core.llm_core import llm
 from src.llm_core.llm_prompt_base import LLMBase
 from src.utils.graph_search import BookGraph, book_graph
 from src.utils.graph_search import search_entity_chapter_index, traverse_relations_for_entities
-from src.utils.chapter_search import guided_deterministic_search
+from src.utils.chapter_search import guided_deterministic_search, load_snapshot
 from src.agent.prompts.output_models import RetrieveOutput
 from src.config import settings
 
@@ -486,6 +488,138 @@ class RetrieveAgent(LLMBase):
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 
+    def _extract_fulltext_keywords(self, query: str, hints: Optional[Dict[str, Any]] = None) -> List[str]:
+        """
+        Build a compact keyword set for chapter fulltext scan.
+
+        Rules:
+        - derive keyword from query tokens only,
+        - normalize to base-like form,
+        - keep exactly one keyword when possible.
+        """
+        _ = hints or {}
+
+        tokens = [
+            t
+            for t in re.findall(r"[a-zA-Z\u0400-\u04FF0-9]+", query.lower())
+            if len(t) >= 3 and not t.isdigit()
+        ]
+        if not tokens:
+            return []
+
+        stopwords = {
+                        # Russian interrogatives and helper words
+            "кто", "что", "какой", "какая", "какие",
+            "перечисли", "список", "все", "всех", "где", "когда", "почему",
+                        # Russian utility words
+            "про", "для", "или", "как", "надо", "нужно", "теперь", "только",
+            "ответ", "вопрос", "глава", "главы",
+        }
+
+        suffixes = (
+            "иями", "ями", "ами", "ого", "ему", "ому", "ими",
+            "ов", "ев", "ей", "ом", "ем", "ам", "ям", "ах", "ях",
+            "ию", "ью", "ия", "ья",
+            "а", "я", "у", "ю", "е", "и", "ы", "о",
+        )
+
+        def to_base_form(token: str) -> str:
+            t = token.strip().lower()
+            for s in suffixes:
+                if len(t) > len(s) + 2 and t.endswith(s):
+                    return t[: -len(s)]
+            return t
+
+        candidates: List[str] = []
+        for token in tokens:
+            if token in stopwords:
+                continue
+            base = to_base_form(token)
+            if len(base) < 3 or base in stopwords:
+                continue
+            if base not in candidates:
+                candidates.append(base)
+
+        if not candidates:
+            return []
+
+                # Prefer first informative anchor from the user query (question-focus token).
+        return [candidates[0]]
+
+    def tool_fulltext_keyword_search(
+        self,
+        query: str,
+        hints: Optional[Dict[str, Any]] = None,
+        max_hits: int = 12,
+    ) -> Dict[str, Any]:
+        """
+        Deterministic keyword scan over chapter texts from snapshot.
+        Used as a safety-net when graph coverage is incomplete.
+        """
+        started = time.perf_counter()
+        hints = hints or {}
+        max_hits = int(max_hits or 12)
+
+        snapshot = load_snapshot("")
+        keywords = self._extract_fulltext_keywords(query=query, hints=hints)
+        chapters = snapshot.get("chapters") or []
+
+        scored: List[Dict[str, Any]] = []
+        for chapter in chapters:
+            chapter_id = chapter.get("chapter_id")
+            if not isinstance(chapter_id, int):
+                continue
+
+            text = str(chapter.get("text", ""))
+            title = str(chapter.get("title", ""))
+            haystack = f"{title}\n{text}".lower()
+            if not haystack.strip():
+                continue
+
+            matched = [kw for kw in keywords if kw in haystack]
+            if not matched:
+                continue
+
+            scored.append(
+                {
+                    "chapter_id": chapter_id,
+                    "score": len(matched),
+                    "matched_keywords": matched[:8],
+                    "snippet": text[:600],
+                }
+            )
+
+        # Prefer higher score and then newer/later chapters first.
+        scored.sort(key=lambda x: (x["score"], x["chapter_id"]), reverse=True)
+        selected = scored[:max_hits]
+        chapter_ids = [row["chapter_id"] for row in selected]
+
+        text_blocks = []
+        for row in selected:
+            text_blocks.append(
+                f"Глава {row['chapter_id']} | keywords={', '.join(row['matched_keywords'])}\n{row['snippet']}"
+            )
+
+        return {
+            "tool_name": "fulltext_keyword_search",
+            "input": {"query": query, "hints": hints, "max_hits": max_hits},
+            "selected_items": selected,
+            "rejected_items": [],
+            "hints": {
+                "chapter_ids": chapter_ids,
+                "source_ids": chapter_ids,
+                "entity_name_tokens": keywords,
+            },
+            "context": {
+                "chapters_text": "\n\n***\n\n".join(text_blocks),
+                "fulltext_hits_text": "\n".join(
+                    [f"chapter={row['chapter_id']} score={row['score']}" for row in selected]
+                ),
+            },
+            "reason": "keyword fulltext scan over snapshot chapters",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
     def tool_chapter_lookup(
         self,
         chapter_ids: Optional[List[int]] = None,
@@ -521,6 +655,118 @@ class RetrieveAgent(LLMBase):
             "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 
+    def tool_chapter_fetch(
+        self,
+        chapter_ids: Optional[List[int]] = None,
+        max_chapters: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Alias for chapter_lookup for clearer ReAct tool naming.
+        """
+        result = self.tool_chapter_lookup(chapter_ids=chapter_ids, max_chapters=max_chapters)
+        result["tool_name"] = "chapter_fetch"
+        return result
+
+    def tool_async_chapter_analysis(
+        self,
+        query: str,
+        chapter_ids: Optional[List[int]] = None,
+        max_hits_per_chapter: int = 6,
+        workers: int = 8,
+    ) -> Dict[str, Any]:
+        """
+        Async deterministic chapter analyzer.
+        Scans provided chapters for query-related keyword evidence and returns
+        compact per-chapter findings for downstream reasoning.
+        """
+        started = time.perf_counter()
+        snapshot = load_snapshot("")
+        chapters = snapshot.get("chapters") or []
+        chapter_map = {
+            row.get("chapter_id"): row
+            for row in chapters
+            if isinstance(row.get("chapter_id"), int)
+        }
+
+        requested_ids = [int(v) for v in (chapter_ids or []) if isinstance(v, int)]
+        if not requested_ids:
+            requested_ids = sorted(chapter_map.keys())
+
+        query_tokens = [
+            t for t in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9]+", query.lower())
+            if len(t) >= 4
+        ]
+        token_set = set(query_tokens)
+
+        def _analyze_one(cid: int) -> Optional[Dict[str, Any]]:
+            row = chapter_map.get(cid)
+            if not row:
+                return None
+            title = str(row.get("title", ""))
+            text = str(row.get("text", ""))
+            haystack = f"{title}\n{text}"
+            lower = haystack.lower()
+            matched = [tok for tok in token_set if tok in lower]
+            if not matched:
+                return None
+
+            lines = [ln.strip() for ln in haystack.splitlines() if ln.strip()]
+            evidence: List[str] = []
+            for tok in matched:
+                for line in lines:
+                    if tok in line.lower():
+                        evidence.append(line)
+                        break
+                if len(evidence) >= max_hits_per_chapter:
+                    break
+
+            return {
+                "chapter_id": cid,
+                "matched_keywords": matched[:max_hits_per_chapter],
+                "evidence": evidence[:max_hits_per_chapter],
+                "score": len(matched),
+            }
+
+        analyzed: List[Dict[str, Any]] = []
+        max_workers = max(1, min(int(workers or 8), 32))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {pool.submit(_analyze_one, cid): cid for cid in requested_ids}
+            for future in as_completed(future_map):
+                result = future.result()
+                if result:
+                    analyzed.append(result)
+
+        analyzed.sort(key=lambda x: (x["score"], -x["chapter_id"]), reverse=True)
+        selected_ids = [row["chapter_id"] for row in analyzed]
+        blocks = []
+        for row in analyzed:
+            evidence_text = "\n".join([f"- {ev}" for ev in row["evidence"]])
+            blocks.append(
+                f"Глава {row['chapter_id']} | score={row['score']} | keywords={', '.join(row['matched_keywords'])}\n{evidence_text}"
+            )
+
+        return {
+            "tool_name": "async_chapter_analysis",
+            "input": {
+                "query": query,
+                "chapter_ids": requested_ids,
+                "max_hits_per_chapter": int(max_hits_per_chapter),
+                "workers": max_workers,
+            },
+            "selected_items": analyzed,
+            "rejected_items": [],
+            "hints": {
+                "chapter_ids": selected_ids,
+                "source_ids": selected_ids,
+                "entity_name_tokens": sorted(token_set),
+            },
+            "context": {
+                "chapters_text": "\n\n***\n\n".join(blocks),
+            },
+            "reason": "async chapter evidence scan by query tokens",
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+
     def run_tool(self, tool_name: str, **tool_input: Dict[str, Any]) -> Dict[str, Any]:
         if tool_name == "semantic_search":
             return self.tool_semantic_search(
@@ -542,10 +788,28 @@ class RetrieveAgent(LLMBase):
                 relation_priority=tool_input.get("relation_priority") or [],
                 limits=tool_input.get("limits") or {},
             )
+        if tool_name == "fulltext_keyword_search":
+            return self.tool_fulltext_keyword_search(
+                query=str(tool_input.get("query", "")),
+                hints=tool_input.get("hints") or {},
+                max_hits=int(tool_input.get("max_hits", 12)),
+            )
         if tool_name == "chapter_lookup":
             return self.tool_chapter_lookup(
                 chapter_ids=tool_input.get("chapter_ids") or [],
                 max_chapters=tool_input.get("max_chapters"),
+            )
+        if tool_name == "chapter_fetch":
+            return self.tool_chapter_fetch(
+                chapter_ids=tool_input.get("chapter_ids") or [],
+                max_chapters=tool_input.get("max_chapters"),
+            )
+        if tool_name == "async_chapter_analysis":
+            return self.tool_async_chapter_analysis(
+                query=str(tool_input.get("query", "")),
+                chapter_ids=tool_input.get("chapter_ids") or [],
+                max_hits_per_chapter=int(tool_input.get("max_hits_per_chapter", 6)),
+                workers=int(tool_input.get("workers", 8)),
             )
         raise ValueError(f"Unknown tool: {tool_name}")
 

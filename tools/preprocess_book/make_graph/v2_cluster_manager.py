@@ -110,6 +110,7 @@ class ClusterManager:
         cluster.last_seen_chapter = max(cluster.last_seen_chapter, event.chapter_id)
         action_items = event.action_entries or [(event.actions, event.source_id)]
         cluster.actions.extend(action_items)
+        self._sort_actions_by_source(cluster)
         cluster.event_ids.append(f"{event.chapter_id}:{event.event_idx}")
 
         for name in event.alt_names:
@@ -142,6 +143,7 @@ class ClusterManager:
             if marker and marker not in target.kinship_aliases:
                 target.kinship_aliases.append(marker)
         target.actions.extend(donor.actions)
+        self._sort_actions_by_source(target)
         target.event_ids.extend(donor.event_ids)
         target.first_seen_chapter = min(target.first_seen_chapter, donor.first_seen_chapter)
         target.last_seen_chapter = max(target.last_seen_chapter, donor.last_seen_chapter)
@@ -152,6 +154,20 @@ class ClusterManager:
 
     def get_active_clusters(self) -> Dict[str, EntityCluster]:
         return {cid: c for cid, c in self.clusters.items() if c.is_active}
+
+    @staticmethod
+    def _action_sort_key(item: tuple[str, tuple[int, ...]]) -> tuple[int, tuple[int, ...]]:
+        _action, sid = item
+        if not isinstance(sid, tuple):
+            return (10**9, ())
+        normalized = tuple(int(v) for v in sid if isinstance(v, int))
+        if not normalized:
+            return (10**9, ())
+        return (min(normalized), normalized)
+
+    def _sort_actions_by_source(self, cluster: EntityCluster) -> None:
+        # Keep cluster action history in chapter order to avoid temporal jumps.
+        cluster.actions.sort(key=self._action_sort_key)
 
     @staticmethod
     def _normalized_names(cluster: EntityCluster) -> List[str]:

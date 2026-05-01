@@ -52,6 +52,13 @@ EXTRACTION_CHAPTER_BATCH_SIZE = int(os.getenv("EXTRACTION_CHAPTER_BATCH_SIZE", "
 EXTRACTION_VALIDATION_RETRY_COUNT = int(
     os.getenv("EXTRACTION_VALIDATION_RETRY_COUNT", "3")
 )
+EXTRACTION_USE_SMALL_CHUNKS = _env_bool("EXTRACTION_USE_SMALL_CHUNKS", True)
+EXTRACTION_SMALL_CHUNK_SIZE = int(os.getenv("EXTRACTION_SMALL_CHUNK_SIZE", "6000"))
+EXTRACTION_SMALL_CHUNK_OVERLAP = int(
+    os.getenv("EXTRACTION_SMALL_CHUNK_OVERLAP", "250")
+)
+V2_VERIFICATION_LAST_N = int(os.getenv("V2_VERIFICATION_LAST_N", "-50"))
+BATCH_STRICT_MERGE = _env_bool("BATCH_STRICT_MERGE", True)
 
 # Настройки для vectorstore
 VECTORSTORE_CHUNK_SIZE = int(os.getenv("VECTORSTORE_CHUNK_SIZE", 512))
@@ -77,3 +84,15 @@ GRAPH_NODES_DIR.mkdir(parents=True, exist_ok=True)
 GRAPH_RELATIONS_DIR.mkdir(parents=True, exist_ok=True)
 SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# Pre-NER helper settings
+ENABLE_PRE_NER_HELPER = _env_bool("ENABLE_PRE_NER_HELPER", False)
+# Master switch: disables any pre-NER stage (Natasha + regex helper + coverage retry inputs).
+PRE_NER_ENABLED = _env_bool("PRE_NER_ENABLED", False)
+PRE_NER_MAX_ENTITIES_PER_BATCH = int(
+    os.getenv("PRE_NER_MAX_ENTITIES_PER_BATCH", "120")
+)
+PRE_NER_COVERAGE_RETRY = _env_bool("PRE_NER_COVERAGE_RETRY", True)
+PRE_NER_USE_NATASHA = _env_bool("PRE_NER_USE_NATASHA", False)
+

@@ -22,6 +22,7 @@ from tools.preprocess_book.make_graph.v2_models import (
     RepairCandidate,
     VerificationDecision,
 )
+from tools.preprocess_book.config.preprocess_settings import V2_VERIFICATION_LAST_N
 from tools.preprocess_book.storage.storage import FileManager
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class VerificationPipelineV2:
         results_dir: Path,
         output_path: Path,
         logs_path: Path,
-        top_k: int = 10,
+        top_k: int = 5,
         llm_type: str | None = None,
         llm_enabled: bool = True,
         max_files: int | None = None,
@@ -126,6 +127,8 @@ class VerificationPipelineV2:
         strict_source_coverage: bool | None = None,
         strict_extraction_coverage: bool | None = None,
         repair_exact_name_only: bool = True,
+        verification_last_n: int = V2_VERIFICATION_LAST_N,
+        verification_snippets_top_k: int = 5,
     ):
         self.results_dir = results_dir
         self.output_path = output_path
@@ -147,11 +150,21 @@ class VerificationPipelineV2:
             in {"1", "true", "yes", "on"}
         )
         self.repair_exact_name_only = bool(repair_exact_name_only)
+        self.verification_last_n = int(verification_last_n)
+        self.verification_snippets_top_k = max(1, int(verification_snippets_top_k))
 
         self.selector = CandidateSelector(top_k=top_k)
         self.cluster_manager = ClusterManager()
-        self.judge = LLMJudge(llm_type=llm_type, enabled=llm_enabled)
+        self.judge = LLMJudge(
+            llm_type=llm_type,
+            enabled=llm_enabled,
+            verification_last_n=self.verification_last_n,
+            verification_snippets_top_k=self.verification_snippets_top_k,
+        )
         self._judge_semaphore = asyncio.Semaphore(self.judge_concurrency)
+        self.dropped_relations_log_path = self.logs_path.with_name(
+            f"{self.logs_path.stem}.dropped_relations.jsonl"
+        )
 
     @staticmethod
     def _extract_source_ids_from_payload(payload: dict) -> set[int]:
@@ -245,9 +258,9 @@ class VerificationPipelineV2:
         main_norm = normalize_text(event.main_name)
         if not main_norm:
             return False
-        names = {normalize_text(cluster.canonical_name)} | {
-            normalize_text(x) for x in getattr(cluster, "alt_names", [])
-        }
+        if not VerificationPipelineV2._is_anchor_name(event.main_name):
+            return False
+        names = VerificationPipelineV2._cluster_anchor_alias_set(cluster)
         return main_norm in names
 
     @staticmethod
@@ -302,6 +315,7 @@ class VerificationPipelineV2:
         sig_b = VerificationPipelineV2._cluster_kinship_signature(cluster_b)
         name_a = normalize_text(cluster_a.canonical_name)
         name_b = normalize_text(cluster_b.canonical_name)
+        same_main_name = bool(name_a and name_b and name_a == name_b)
 
         # Different parent anchors for same kinship role.
         if (
@@ -311,6 +325,9 @@ class VerificationPipelineV2:
                 sig_a["child_of"], sig_b["child_of"]
             )
         ):
+            # For identical canonical names, prefer name identity over noisy kinship anchors.
+            if same_main_name:
+                return None
             return "hard_negative:child_of_conflict"
 
         if (
@@ -353,17 +370,53 @@ class VerificationPipelineV2:
 
     @staticmethod
     def _strong_alias_set(cluster) -> set[str]:
-        values = {normalize_text(cluster.canonical_name)}
-        values.update(normalize_text(v) for v in getattr(cluster, "alt_names", []))
-        values.update(normalize_text(v) for v in getattr(cluster, "kinship_aliases", []))
+        values: set[str] = {cluster.canonical_name}
+        values.update(getattr(cluster, "alt_names", []))
+        values.update(getattr(cluster, "kinship_aliases", []))
         filtered: set[str] = set()
         for value in values:
-            if not value:
+            if not VerificationPipelineV2._is_anchor_name(value):
                 continue
-            if VerificationPipelineV2._is_role_like_label(value):
+            normalized = normalize_text(value)
+            if not normalized:
                 continue
-            filtered.add(value)
+            filtered.add(normalized)
         return filtered
+
+    @staticmethod
+    def _has_capitalized_leading_alpha(value: str) -> bool:
+        raw = (value or "").strip()
+        if not raw:
+            return False
+        for ch in raw:
+            if not ch.isalpha():
+                continue
+            return ch == ch.upper() and ch != ch.lower()
+        return False
+
+    @staticmethod
+    def _is_anchor_name(value: str) -> bool:
+        if not VerificationPipelineV2._has_capitalized_leading_alpha(value):
+            return False
+        return not VerificationPipelineV2._is_role_like_label(value)
+
+    @staticmethod
+    def _anchor_alias_set(values: List[str]) -> set[str]:
+        anchors: set[str] = set()
+        for value in values:
+            if not VerificationPipelineV2._is_anchor_name(value):
+                continue
+            normalized = normalize_text(value)
+            if normalized:
+                anchors.add(normalized)
+        return anchors
+
+    @staticmethod
+    def _cluster_anchor_alias_set(cluster) -> set[str]:
+        values = [cluster.canonical_name]
+        values.extend(list(getattr(cluster, "alt_names", [])))
+        values.extend(list(getattr(cluster, "kinship_aliases", [])))
+        return VerificationPipelineV2._anchor_alias_set(values)
 
     @staticmethod
     def _passes_non_identical_name_guard(cluster_a, cluster_b, cand: RepairCandidate) -> bool:
@@ -503,11 +556,29 @@ class VerificationPipelineV2:
             return True
 
         event_main = normalize_text(event.main_name)
-        canonical = normalize_text(cluster.canonical_name)
-        alt_names = {normalize_text(x) for x in getattr(cluster, "alt_names", [])}
-        explicit_alias = event_main == canonical or event_main in alt_names
+        explicit_alias = event_main in self._cluster_anchor_alias_set(cluster)
         # Generic names are allowed only with explicit alias and strong lexical match.
         return explicit_alias and cand.name_score >= 0.90
+
+    def _passes_non_identical_event_anchor_guard(self, event: NodeEvent, cluster) -> bool:
+        event_main = normalize_text(event.main_name)
+        cluster_canonical = normalize_text(cluster.canonical_name)
+        if not event_main or not cluster_canonical:
+            return False
+        if event_main == cluster_canonical:
+            return True
+
+        event_anchors = self._anchor_alias_set([event.main_name] + list(event.alt_names))
+        cluster_anchors = self._cluster_anchor_alias_set(cluster)
+        if not event_anchors or not cluster_anchors:
+            return False
+
+        explicit_bridge = (
+            (event_main in cluster_anchors)
+            or (cluster_canonical in event_anchors)
+            or bool(event_anchors.intersection(cluster_anchors))
+        )
+        return explicit_bridge
 
     def _build_event(
         self, source_id: Tuple[int, ...], idx: int, raw: dict
@@ -587,14 +658,15 @@ class VerificationPipelineV2:
 
         tasks = []
         effective_candidates = []
+        effective_clusters = []
         for cand in candidates:
             cluster = active_clusters.get(cand.cluster_id)
             if cluster is None:
                 continue
             effective_candidates.append(cand)
-            tasks.append(self._judge_candidate_async(event, cand, cluster))
+            effective_clusters.append(cluster)
 
-        if not tasks:
+        if not effective_candidates:
             return VerificationDecision(
                 accepted_cluster_id=None,
                 candidates_checked=[],
@@ -602,16 +674,24 @@ class VerificationPipelineV2:
                 reason="no_candidates",
             )
 
-        judge_traces = await asyncio.gather(*tasks)
+        # Hybrid mode:
+        # 1) Judge top-1 first (fast short-circuit on accept).
+        # 2) Judge remaining candidates only if top-1 did not pass.
+        top_cand = effective_candidates[0]
+        top_cluster = effective_clusters[0]
+        top_trace = await self._judge_candidate_async(event, top_cand, top_cluster)
+        judge_traces = [top_trace]
         accepted_options: List[dict] = []
-
         alias_hit_candidates = 0
-        for cand, trace in zip(effective_candidates, judge_traces, strict=True):
+
+        def _append_if_accepted(cand, trace):
             if not trace["is_same"] or not trace["passed_generic_guard"]:
-                continue
+                return
             cluster = active_clusters.get(cand.cluster_id)
             if cluster is None:
-                continue
+                return
+            if not self._passes_non_identical_event_anchor_guard(event, cluster):
+                return
 
             confidence = str(trace["judge"].get("confidence", ""))
             confidence_bonus = self._confidence_bonus(confidence)
@@ -621,7 +701,7 @@ class VerificationPipelineV2:
             )
             alias_hit = self._event_main_hits_cluster_alias(event, cluster)
             if alias_hit:
-                alias_hit_candidates += 1
+                nonlocal_alias_hits[0] += 1
 
             accepted_options.append(
                 {
@@ -633,6 +713,37 @@ class VerificationPipelineV2:
                     "support": self._cluster_support(cluster),
                 }
             )
+
+        nonlocal_alias_hits = [0]
+        _append_if_accepted(top_cand, top_trace)
+        alias_hit_candidates = nonlocal_alias_hits[0]
+
+        if accepted_options:
+            option = accepted_options[0]
+            canonical_weight = 0.08
+            option["rank"] = (
+                option["candidate_score"]
+                + option["confidence_bonus"]
+                + (canonical_weight * option["canonical_match"])
+                + (0.02 if option["alias_hit"] else 0.0)
+                + min(0.10, 0.01 * option["support"])
+            )
+            return VerificationDecision(
+                accepted_cluster_id=option["cluster_id"],
+                candidates_checked=effective_candidates,
+                judge_traces=judge_traces,
+                reason="judge_accept",
+            )
+
+        # Top-1 rejected -> judge remaining candidates in parallel.
+        for cand, cluster in zip(effective_candidates[1:], effective_clusters[1:], strict=True):
+            tasks.append(self._judge_candidate_async(event, cand, cluster))
+        if tasks:
+            rest_traces = await asyncio.gather(*tasks)
+            judge_traces.extend(rest_traces)
+            for cand, trace in zip(effective_candidates[1:], rest_traces, strict=True):
+                _append_if_accepted(cand, trace)
+            alias_hit_candidates = nonlocal_alias_hits[0]
 
         if accepted_options:
             for option in accepted_options:
@@ -779,7 +890,7 @@ class VerificationPipelineV2:
 
     async def _repair_iteration_async(self, iteration: int) -> int:
         candidates = self.cluster_manager.candidate_clusters_for_repair(
-            top_k_per_cluster=max(6, self.top_k),
+            top_k_per_cluster=max(5, self.top_k),
             min_total_score=0.34,
             max_token_bucket=70,
             max_pair_candidates=250,
@@ -943,9 +1054,20 @@ class VerificationPipelineV2:
                 _safe_alias_map(f"{node.main_name}__{cluster.cluster_id}", node_key)
                 _safe_alias_map(cluster.cluster_id, node_key)
 
-        rel_graph = EdgeRewriter(self.cluster_manager).rewrite_relations(
+        rel_graph, rewrite_report = EdgeRewriter(self.cluster_manager).rewrite_relations(
             relations_by_source,
             cluster_to_node_key=cluster_to_node_key,
+        )
+        for row in rewrite_report.get("dropped_relations", []):
+            if isinstance(row, dict):
+                append_jsonl(self.dropped_relations_log_path, row)
+        append_jsonl(
+            self.logs_path,
+            {
+                "stage": "relations_rewrite_metrics",
+                "per_source_metrics": rewrite_report.get("per_source_metrics", {}),
+                "dropped_relations_log_path": str(self.dropped_relations_log_path),
+            },
         )
         return BookGraph(nodes=all_nodes, relationships=rel_graph)
 

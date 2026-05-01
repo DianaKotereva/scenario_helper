@@ -15,7 +15,9 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any, Dict, List
 
+from langchain_core.documents import Document
 from tools.preprocess_book.config.preprocess_settings import (
     GRAPH_NODES_DIR,
     GRAPH_RELATIONS_DIR,
@@ -117,6 +119,43 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    return rows
+
+
+def _verification_chunks_to_documents(rows: List[Dict[str, Any]]) -> List[Document]:
+    docs: List[Document] = []
+    for row in rows:
+        source_id = row.get("source_id")
+        chapter_id = row.get("chapter_id", source_id)
+        text = str(row.get("text", "") or "")
+        chunk_id = str(row.get("chunk_id", "") or "")
+        if not isinstance(source_id, int) or not text.strip():
+            continue
+        metadata = {
+            "source": "book",
+            "source_id": int(source_id),
+            "chapter_id": int(chapter_id) if isinstance(chapter_id, int) else int(source_id),
+            "chunk_id": chunk_id,
+            "doc_uid": f"book_chunk::{chunk_id or source_id}",
+            "origin": "verification_chunks",
+        }
+        docs.append(Document(page_content=text, metadata=metadata))
+    return docs
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -159,6 +198,32 @@ def main() -> None:
             or int(doc.metadata["source_id"]) in graph_source_ids
         ]
     split_docs = preparer.split_to_small_chunks(other_documents)
+
+    # Always include book chunks in all_langchain_chunks:
+    # prefer exact pipeline verification chunks (source_id-aligned), fallback to
+    # splitter-based chapter chunking.
+    verification_chunk_docs: List[Document] = []
+    if args.results_dir:
+        verification_chunks_path = (
+            Path(args.results_dir) / "_verification_chunks" / "chunks_source_split_512tok.jsonl"
+        )
+        rows = _read_jsonl(verification_chunks_path)
+        verification_chunk_docs = _verification_chunks_to_documents(rows)
+        if verification_chunk_docs:
+            logger.info(
+                "Book chunks added from verification chunks: path=%s rows=%s",
+                verification_chunks_path,
+                len(verification_chunk_docs),
+            )
+
+    if not verification_chunk_docs:
+        verification_chunk_docs = preparer.split_to_small_chunks(chapters, include_chapters=True)
+        logger.warning(
+            "Verification chunks not found; fallback chapter chunking used: rows=%s",
+            len(verification_chunk_docs),
+        )
+
+    split_docs = split_docs + verification_chunk_docs
 
     vector_index_status = {
         "ok": True,

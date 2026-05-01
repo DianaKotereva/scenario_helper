@@ -279,7 +279,7 @@ def main():
     parser.add_argument(
         "--v2-top-k",
         type=int,
-        default=10,
+        default=5,
         help="Top-k candidates for v2like merge.",
     )
     parser.add_argument(
@@ -376,7 +376,7 @@ def main():
         extractor = ExtractNames(llm=llm)
         extractor_missing_nodes = ExtractMissingNodes(llm=llm)
         extractor_relations = ExtractRelations(llm=llm)
-        verificator = Verification(llm=llm, parser=json_parser)
+        verificator = Verification(llm=llm, parser=json_parser, snippets_top_k=max(1, int(args.v2_verification_snippets_top_k)))
 
         # Инициализация сервисов
         logger.info("Инициализация сервисов...")
@@ -464,6 +464,7 @@ def main():
             enable_bridge_merge=not args.v2_disable_bridge_merge,
             judge_concurrency=judge_concurrency,
             verification_last_n=verification_last_n,
+            verification_snippets_top_k=max(1, int(args.v2_verification_snippets_top_k)),
         )
         book_graph = pipeline.run()
         logger.info(

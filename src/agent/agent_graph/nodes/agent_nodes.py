@@ -3,7 +3,9 @@ Agent graph nodes for ReAct-style orchestration.
 """
 
 import logging
+import time
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, Iterable, List
 
 import src.config.settings as settings
@@ -50,7 +52,9 @@ def _initialize_default_values(state: AgentState) -> AgentState:
         },
         "evidence": [],
         "react_iteration": 0,
-        "react_max_iterations": int(getattr(settings, "MAX_N_ITERATIONS", 2)) + 2,
+        # Relax ReAct budget: allow extra exploration before final answer.
+        # This keeps chapter fetch guaranteed while allowing additional cycles.
+        "react_max_iterations": max(int(getattr(settings, "MAX_N_ITERATIONS", 2)) + 6, 8),
         "route_reason": "",
         "final_ready": False,
         "last_tool_name": None,
@@ -79,7 +83,8 @@ def planner_node(state: AgentState) -> AgentState:
         "semantic_search",
         "deterministic_entity_search",
         "deterministic_graph_expand",
-        "chapter_lookup_if_needed",
+        "fulltext_keyword_search",
+        "chapter_fetch_if_needed",
         "final_answer",
     ]
 
@@ -102,16 +107,25 @@ def _prepare_next_tool_call(state: AgentState) -> None:
         state["route_reason"] = "final_ready already set"
         return
 
-    if state.get("react_iteration", 0) >= state.get("react_max_iterations", 4):
-        state["final_ready"] = True
-        state["pending_tool_call"] = {}
-        state["route_reason"] = "react iteration limit reached"
-        return
+    if state.get("react_iteration", 0) >= state.get("react_max_iterations", 8):
+        # Hard stop only if chapter fetch has already happened (or no chapters to fetch).
+        hints = state.get("hints", {}) or {}
+        tool_calls = state.get("tool_calls", []) or []
+        used_tool_names = {str(tc.get("tool_name", "")) for tc in tool_calls}
+        chapter_ids = hints.get("chapter_ids", []) or []
+        chapter_done = ("chapter_fetch" in used_tool_names) or ("chapter_lookup" in used_tool_names)
+        if chapter_done or not chapter_ids:
+            state["final_ready"] = True
+            state["pending_tool_call"] = {}
+            state["route_reason"] = "react iteration limit reached"
+            return
 
     last_tool = state.get("last_tool_name")
     hints = state.get("hints", {}) or {}
+    tool_calls = state.get("tool_calls", []) or []
+    used_tool_names = {str(tc.get("tool_name", "")) for tc in tool_calls}
 
-    if not state.get("tool_calls"):
+    if not tool_calls:
         tool_name = "semantic_search"
         tool_input = {
             "query": state["user_question"],
@@ -119,7 +133,7 @@ def _prepare_next_tool_call(state: AgentState) -> None:
             "k": settings.PHASE_A_RECALL_K,
         }
         reason = "no tool calls yet"
-    elif last_tool == "semantic_search":
+    elif "deterministic_entity_search" not in used_tool_names:
         tool_name = "deterministic_entity_search"
         tool_input = {
             "query": state["user_question"],
@@ -127,7 +141,7 @@ def _prepare_next_tool_call(state: AgentState) -> None:
             "top_k": settings.PHASE_B_MAX_ENTITIES,
         }
         reason = "semantic hints collected"
-    elif last_tool == "deterministic_entity_search":
+    elif "deterministic_graph_expand" not in used_tool_names:
         tool_name = "deterministic_graph_expand"
         tool_input = {
             "query": state["user_question"],
@@ -140,11 +154,18 @@ def _prepare_next_tool_call(state: AgentState) -> None:
             },
         }
         reason = "entity candidates available"
-    elif last_tool == "deterministic_graph_expand":
+    elif "fulltext_keyword_search" not in used_tool_names:
+        tool_name = "fulltext_keyword_search"
+        tool_input = {
+            "query": state["user_question"],
+            "hints": hints,
+            "max_hits": max(10, int(getattr(settings, "MAX_CHAPTERS_IN_CONTEXT", 10))),
+        }
+        reason = "coverage safety-net over raw chapter texts"
+    elif "chapter_fetch" not in used_tool_names and "chapter_lookup" not in used_tool_names:
         chapter_ids = hints.get("chapter_ids", [])
-        used_chapter_lookup = any(tc.get("tool_name") == "chapter_lookup" for tc in state.get("tool_calls", []))
-        if chapter_ids and not used_chapter_lookup:
-            tool_name = "chapter_lookup"
+        if chapter_ids:
+            tool_name = "chapter_fetch"
             tool_input = {
                 "chapter_ids": chapter_ids,
                 "max_chapters": settings.MAX_CHAPTERS_IN_CONTEXT,
@@ -155,7 +176,7 @@ def _prepare_next_tool_call(state: AgentState) -> None:
             state["pending_tool_call"] = {}
             state["route_reason"] = "graph expansion complete"
             return
-    elif last_tool == "chapter_lookup":
+    elif last_tool in {"chapter_lookup", "chapter_fetch"}:
         state["final_ready"] = True
         state["pending_tool_call"] = {}
         state["route_reason"] = "chapter grounding complete"
@@ -240,13 +261,235 @@ def tool_exec_node(state: AgentState) -> AgentState:
 
 def _append_context_from_tool(state: AgentState, tool_name: str, context: Dict[str, Any]) -> None:
     chunks: List[str] = []
-    for key in ["nodes_texts", "rel_texts", "quote_texts", "sums_texts", "entities_text", "relations_text", "chapters_text"]:
+    for key in [
+        "nodes_texts",
+        "rel_texts",
+        "quote_texts",
+        "sums_texts",
+        "entities_text",
+        "relations_text",
+        "chapters_text",
+        "fulltext_hits_text",
+    ]:
         value = context.get(key)
         if isinstance(value, str) and value.strip():
             chunks.append(f"[{tool_name}:{key}]\n{value.strip()}")
     if not chunks:
         return
     state.setdefault("context", []).append({tool_name: "\n\n".join(chunks)})
+
+
+def _apply_tool_result_to_state(
+    state: AgentState,
+    tool_name: str,
+    tool_input: Dict[str, Any],
+    result: Dict[str, Any],
+    route_reason: str,
+    iteration: int,
+) -> None:
+    state["last_tool_name"] = tool_name
+    state["last_tool_result"] = result
+    state.setdefault("tool_calls", []).append(
+        {
+            "iteration": iteration,
+            "tool_name": tool_name,
+            "input": tool_input,
+            "latency_ms": result.get("latency_ms", 0.0),
+            "route_reason": route_reason,
+        }
+    )
+    observe_node(state)
+    state["last_tool_result"] = {}
+
+
+def pre_react_bootstrap_node(state: AgentState) -> AgentState:
+    """
+    Mandatory retrieval bootstrap before ReAct:
+    1) semantic search with graph extraction
+    2) strict keyword fulltext scan
+    3) chapter fetch by merged chapter ids
+    4) async chapter analysis for dense evidence
+    """
+    state = _initialize_default_values(state)
+    _validate_state(state)
+    if state.get("bootstrap_done"):
+        return state
+
+    query = state["user_question"]
+    hints = state.get("hints", {}) or {}
+    semantic_chapter_ids: List[int] = []
+    fulltext_chapter_ids: List[int] = []
+
+    bootstrap_plan = [
+        (
+            "semantic_search",
+            {
+                "query": query,
+                "hints": hints,
+                "k": settings.PHASE_A_RECALL_K,
+            },
+            "bootstrap phase 1/4: semantic graph retrieval",
+        ),
+        (
+            "fulltext_keyword_search",
+            {
+                "query": query,
+                "hints": hints,
+                "max_hits": max(20, int(getattr(settings, "MAX_CHAPTERS_IN_CONTEXT", 10)) * 2),
+            },
+            "bootstrap phase 2/4: strict keyword fulltext retrieval",
+        ),
+    ]
+
+    iteration = 0
+    for tool_name, tool_input, reason in bootstrap_plan:
+        iteration += 1
+        try:
+            result = retrieve_agent.run_tool(tool_name=tool_name, **tool_input)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Bootstrap tool failed for %s: %s", tool_name, exc, exc_info=True)
+            result = {
+                "tool_name": tool_name,
+                "input": tool_input,
+                "selected_items": [],
+                "rejected_items": [{"reason": str(exc)}],
+                "hints": {},
+                "context": {},
+                "latency_ms": 0.0,
+                "error": str(exc),
+            }
+        _apply_tool_result_to_state(
+            state=state,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            result=result,
+            route_reason=reason,
+            iteration=iteration,
+        )
+        if tool_name == "semantic_search":
+            semantic_chapter_ids = [
+                int(v) for v in (result.get("hints", {}).get("chapter_ids", []) or []) if isinstance(v, int)
+            ]
+        if tool_name == "fulltext_keyword_search":
+            fulltext_chapter_ids = [
+                int(v) for v in (result.get("hints", {}).get("chapter_ids", []) or []) if isinstance(v, int)
+            ]
+        hints = state.get("hints", {}) or {}
+
+    max_bootstrap_chapters = max(12, int(getattr(settings, "MAX_CHAPTERS_IN_CONTEXT", 10)) * 2)
+    merged_chapters: List[int] = []
+    for cid in fulltext_chapter_ids + semantic_chapter_ids:
+        if cid not in merged_chapters:
+            merged_chapters.append(cid)
+    chapter_ids = merged_chapters[:max_bootstrap_chapters]
+    if not chapter_ids:
+        chapter_ids = (hints.get("chapter_ids", []) or [])[:max_bootstrap_chapters]
+
+    chapter_fetch_input = {
+        "chapter_ids": chapter_ids,
+        "max_chapters": max_bootstrap_chapters,
+    }
+    iteration += 1
+    try:
+        chapter_fetch_result = retrieve_agent.run_tool(tool_name="chapter_fetch", **chapter_fetch_input)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Bootstrap tool failed for chapter_fetch: %s", exc, exc_info=True)
+        chapter_fetch_result = {
+            "tool_name": "chapter_fetch",
+            "input": chapter_fetch_input,
+            "selected_items": [],
+            "rejected_items": [{"reason": str(exc)}],
+            "hints": {},
+            "context": {},
+            "latency_ms": 0.0,
+            "error": str(exc),
+        }
+    _apply_tool_result_to_state(
+        state=state,
+        tool_name="chapter_fetch",
+        tool_input=chapter_fetch_input,
+        result=chapter_fetch_result,
+        route_reason="bootstrap phase 3/4: fetch all candidate chapters",
+        iteration=iteration,
+    )
+
+    hints = state.get("hints", {}) or {}
+    # Analyze chapters asynchronously one-by-one, then aggregate.
+    # This keeps per-chapter analysis isolated and avoids one monolithic pass.
+    iteration += 1
+    async_started = time.perf_counter() if "time" in globals() else None
+    analysis_workers = max(1, min(12, len(chapter_ids)))
+    chapter_results: List[Dict[str, Any]] = []
+    chapter_errors: List[Dict[str, Any]] = []
+
+    def _analyze_single(ch_id: int) -> Dict[str, Any]:
+        return retrieve_agent.run_tool(
+            tool_name="async_chapter_analysis",
+            query=query,
+            chapter_ids=[int(ch_id)],
+            max_hits_per_chapter=3,
+            workers=1,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=analysis_workers) as pool:
+            futures = {pool.submit(_analyze_single, cid): cid for cid in chapter_ids}
+            for future in as_completed(futures):
+                cid = futures[future]
+                try:
+                    chapter_results.append(future.result())
+                except Exception as exc:  # noqa: BLE001
+                    chapter_errors.append({"chapter_id": cid, "reason": str(exc)})
+    except Exception as exc:  # noqa: BLE001
+        chapter_errors.append({"reason": str(exc)})
+
+    merged_selected: List[Dict[str, Any]] = []
+    merged_chapter_ids: List[int] = []
+    merged_blocks: List[str] = []
+    for res in chapter_results:
+        for item in (res.get("selected_items") or []):
+            if isinstance(item, dict):
+                merged_selected.append(item)
+                cid = item.get("chapter_id")
+                if isinstance(cid, int) and cid not in merged_chapter_ids:
+                    merged_chapter_ids.append(cid)
+        ctx = res.get("context") or {}
+        block = ctx.get("chapters_text")
+        if isinstance(block, str) and block.strip():
+            merged_blocks.append(block.strip())
+
+    async_analysis_result = {
+        "tool_name": "async_chapter_analysis",
+        "input": {
+            "query": query,
+            "chapter_ids": chapter_ids,
+            "max_hits_per_chapter": 3,
+            "workers": analysis_workers,
+            "mode": "per_chapter_async",
+        },
+        "selected_items": merged_selected,
+        "rejected_items": chapter_errors,
+        "hints": {
+            "chapter_ids": merged_chapter_ids,
+            "source_ids": merged_chapter_ids,
+        },
+        "context": {
+            "chapters_text": "\n\n***\n\n".join(merged_blocks),
+        },
+        "reason": "bootstrap phase 4/4: per-chapter async evidence analysis",
+        "latency_ms": round(((time.perf_counter() - async_started) * 1000), 2) if async_started else 0.0,
+    }
+    _apply_tool_result_to_state(
+        state=state,
+        tool_name="async_chapter_analysis",
+        tool_input=async_analysis_result.get("input", {}),
+        result=async_analysis_result,
+        route_reason="bootstrap phase 4/4: per-chapter async evidence analysis",
+        iteration=iteration,
+    )
+
+    state["bootstrap_done"] = True
+    return state
 
 
 def observe_node(state: AgentState) -> AgentState:

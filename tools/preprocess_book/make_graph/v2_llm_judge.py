@@ -20,13 +20,19 @@ class LLMJudge:
         llm_type: str | None = None,
         enabled: bool = True,
         verification_last_n: int = -50,
+        verification_snippets_top_k: int = 5,
     ):
         self.enabled = enabled
         self.verification_last_n = int(verification_last_n)
+        self.verification_snippets_top_k = max(1, int(verification_snippets_top_k))
         self._verifier = None
         if enabled:
             llm = create_llm(llm_type=llm_type)
-            self._verifier = Verification(llm=llm, parser=JsonOutputParser())
+            self._verifier = Verification(
+                llm=llm,
+                parser=JsonOutputParser(),
+                snippets_top_k=self.verification_snippets_top_k,
+            )
 
     @staticmethod
     def _cluster_to_book_node(cluster) -> BookNode:

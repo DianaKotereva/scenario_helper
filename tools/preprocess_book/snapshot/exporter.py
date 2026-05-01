@@ -11,6 +11,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from tools.preprocess_book.utils.text_loader import load_book, split_book
+
 from .schema import (
     ActionByChapter,
     ChapterRecord,
@@ -82,9 +84,11 @@ def _iter_numeric_pickles(directory: Path, max_files: int = 0) -> List[Tuple[int
 
 
 def _split_book_to_parts(book_path: Path) -> List[str]:
-    text = book_path.read_text(encoding="utf-8")
-    # Matches the preprocessing split separators: ["========== ", "***"]
-    parts = [p.strip() for p in re.split(r"(?:========== |\*\*\*)", text) if p.strip()]
+    # Use the same splitter as extraction pipeline (split_book with default settings).
+    # This keeps chapter_id/source_id fully aligned with extraction.
+    text = load_book(book_path)
+    docs = split_book(text)
+    parts = [str(doc.page_content or "").strip() for doc in docs if str(doc.page_content or "").strip()]
     return parts
 
 
@@ -147,6 +151,82 @@ def _build_chunks(chapters: Sequence[ChapterRecord], chunk_size: int, chunk_over
     for chapter in chapters:
         rows.extend(_chunk_chapter(chapter, chunk_size=chunk_size, chunk_overlap=chunk_overlap))
     return rows
+
+
+def _chunk_sort_key(chunk_id: str, metadata: Dict[str, Any]) -> Tuple[int, str]:
+    idx = metadata.get("chunk_index")
+    if isinstance(idx, int):
+        return (idx, str(chunk_id))
+    m = re.match(r"^ch_?(\d+)_(\d+)$", str(chunk_id or "").strip())
+    if m:
+        return (int(m.group(2)), str(chunk_id))
+    return (10**9, str(chunk_id))
+
+
+def _build_chunks_from_verification_file(
+    *,
+    verification_chunks_path: Path,
+    chapter_ids: Sequence[int],
+    chapter_title_by_id: Dict[int, str],
+) -> List[ChunkRecord]:
+    if not verification_chunks_path.exists():
+        return []
+
+    allowed = set(int(v) for v in chapter_ids)
+    by_chapter: Dict[int, List[Dict[str, Any]]] = {}
+    with verification_chunks_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            sid = row.get("source_id")
+            cid = row.get("chapter_id", sid)
+            text = str(row.get("text", "") or "")
+            chunk_id = str(row.get("chunk_id", "") or "")
+            if not isinstance(sid, int) or not isinstance(cid, int):
+                continue
+            if cid not in allowed:
+                continue
+            if not text or not chunk_id:
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            by_chapter.setdefault(cid, []).append(
+                {
+                    "chunk_id": chunk_id,
+                    "text": text,
+                    "source_id": sid,
+                    "chapter_id": cid,
+                    "metadata": metadata,
+                }
+            )
+
+    chunks: List[ChunkRecord] = []
+    for cid in sorted(by_chapter.keys()):
+        rows = sorted(
+            by_chapter[cid],
+            key=lambda r: _chunk_sort_key(r["chunk_id"], r.get("metadata") or {}),
+        )
+        for row in rows:
+            text = str(row["text"])
+            md = dict(row.get("metadata") or {})
+            md.setdefault("title", chapter_title_by_id.get(cid, f"Chapter {cid}"))
+            md.setdefault("origin", "verification_chunks")
+            chunks.append(
+                ChunkRecord(
+                    chunk_id=str(row["chunk_id"]),
+                    text=text,
+                    source_id=int(row["source_id"]),
+                    chapter_id=int(cid),
+                    start=-1,
+                    end=-1,
+                    metadata=md,
+                )
+            )
+    return chunks
 
 
 def _normalize_actions_from_raw(raw_actions: Any, default_source_id: int) -> List[str]:
@@ -553,7 +633,33 @@ def export_snapshot(
         )
 
     chapters = _build_chapters(book_path=book_path, chapter_ids=chapter_ids)
-    chunks = _build_chunks(chapters=chapters, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    chapter_title_by_id = {int(ch.chapter_id): str(ch.title) for ch in chapters}
+
+    chunks: List[ChunkRecord] = []
+    verification_chunks_path: Optional[Path] = None
+    if results_dir:
+        candidate = results_dir / "_verification_chunks" / "chunks_source_split_512tok.jsonl"
+        if candidate.exists():
+            verification_chunks_path = candidate
+            chunks = _build_chunks_from_verification_file(
+                verification_chunks_path=candidate,
+                chapter_ids=chapter_ids,
+                chapter_title_by_id=chapter_title_by_id,
+            )
+            logger.info(
+                "Snapshot chunks sourced from verification chunks: %s rows=%s",
+                candidate,
+                len(chunks),
+            )
+
+    if not chunks:
+        chunks = _build_chunks(chapters=chapters, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        logger.info(
+            "Snapshot chunks sourced from chapter splitter: chunk_size=%s overlap=%s rows=%s",
+            chunk_size,
+            chunk_overlap,
+            len(chunks),
+        )
 
     entities_rows = [asdict(v) for v in raw_entities] + [asdict(v) for v in merged_entities]
     relations_rows = [asdict(v) for v in raw_relations] + [asdict(v) for v in merged_relations]
@@ -573,6 +679,7 @@ def export_snapshot(
         "output_dir": str(output_dir),
         "counts": counts,
         "chapter_ids": sorted(set(chapter_ids)),
+        "chunks_source": str(verification_chunks_path) if verification_chunks_path else "chapter_splitter",
         "raw_entities": len(raw_entities),
         "merged_entities": len(merged_entities),
         "raw_relations": len(raw_relations),

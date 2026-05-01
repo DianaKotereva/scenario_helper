@@ -11,7 +11,10 @@ import pickle
 import re
 from typing import Any, Dict, List, Optional, Set
 
-from langchain.retrievers import EnsembleRetriever
+try:
+    from langchain.retrievers import EnsembleRetriever
+except Exception:  # pragma: no cover - compatibility for langchain>=1.x
+    from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings

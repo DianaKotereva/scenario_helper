@@ -28,7 +28,7 @@ def jaccard(a: Iterable[str], b: Iterable[str]) -> float:
 
 
 class CandidateSelector:
-    def __init__(self, top_k: int = 10):
+    def __init__(self, top_k: int = 5):
         self.top_k = top_k
 
     def _name_score(self, event: NodeEvent, cluster: EntityCluster) -> float:

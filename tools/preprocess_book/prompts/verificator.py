@@ -70,7 +70,12 @@ system_prompt = """
 class Verification(LLMBase):
     """Класс для верификации сущностей."""
 
-    def __init__(self, llm, parser: JsonOutputParser = None):
+    def __init__(
+        self,
+        llm,
+        parser: JsonOutputParser = None,
+        snippets_top_k: int = 5,
+    ):
         if parser is None:
             parser = JsonOutputParser()
         super().__init__(
@@ -79,6 +84,7 @@ class Verification(LLMBase):
             parser=parser,
             parse_json=True,
         )
+        self.snippets_top_k = max(1, int(snippets_top_k))
         self._chunk_index_by_source_id: Dict[int, List[Dict[str, str]]] | None = None
 
     @staticmethod
@@ -129,6 +135,14 @@ class Verification(LLMBase):
     @staticmethod
     def _normalize_search_text(value: str) -> str:
         return (value or "").lower().replace("ё", "е")
+
+    @staticmethod
+    def _big_chunk_sort_key(chunk_id: str) -> tuple[int, int, str]:
+        value = str(chunk_id or "").strip()
+        m = re.match(r"^ch_?(\d+)_(\d+)$", value)
+        if m:
+            return (int(m.group(1)), int(m.group(2)), value)
+        return (10**9, 10**9, value)
 
     @staticmethod
     def _stem_token(token: str) -> str:
@@ -281,8 +295,8 @@ class Verification(LLMBase):
         elif top_action_hits:
             best_term = sorted(top_action_hits, key=len, reverse=True)[0]
 
-        # Keep prompt size stable: at most top-2 snippets per action.
-        top_chunks = ordered_chunks[:2]
+        # Keep prompt size stable: top-k snippets per action.
+        top_chunks = ordered_chunks[: self.snippets_top_k]
         text_snippets = []
         for chunk in top_chunks:
             text_snippets.append(
@@ -336,14 +350,12 @@ class Verification(LLMBase):
                     snippets_order.append(chunk_id)
 
             def _finalize_snippets(actions_count: int) -> List[Dict[str, Any]]:
-                # Mirror action truncation: keep roughly half as many snippets as actions.
+                # Keep node-level snippets bounded by configurable top-k.
                 snippets = [snippets_map[cid] for cid in snippets_order if cid in snippets_map]
-                if actions_count > 0:
-                    snippet_limit = max(1, actions_count // 2)
-                    snippets = snippets[-snippet_limit:]
+                snippets = snippets[-self.snippets_top_k :]
                 return sorted(
                     snippets,
-                    key=lambda x: str(x.get("big_chunk_id", "")),
+                    key=lambda x: self._big_chunk_sort_key(str(x.get("big_chunk_id", ""))),
                 )
 
             if isinstance(actions, str):
