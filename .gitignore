@@ -12,4 +12,10 @@ test_data/results/
 data/*.lfs_pointer_backup
 data/all_langchain_chunks_noprefix.pkl
 data/all_langchain_chunks_with_prefix_backup.pkl
+data/all_langchain_chunks.pkl
+data/vector_store.faiss/*.faiss
+data/vector_store.faiss/*.pkl
+data/bookgraph_*.pkl
+data/bookgraph_full_*.pkl
+data/bookgraph_probe*.pkl
 
