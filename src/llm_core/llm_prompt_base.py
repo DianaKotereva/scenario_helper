@@ -1,5 +1,9 @@
 import asyncio
+import json
+import os
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Union
 
@@ -70,13 +74,17 @@ class LLMBase(ABC):
         """Execute LLM chain synchronously"""
         chain_input = self.make_user_prompt(**kwargs)
         result = self.make_llm_chain().invoke(chain_input)
-        return self._process_output(result)
+        processed = self._process_output(result)
+        self._write_llm_trace("invoke", chain_input, processed)
+        return processed
 
     async def ainvoke(self, **kwargs: Dict[str, Any]) -> str:
         """Execute LLM chain asynchronously"""
         chain_input = self.make_user_prompt(**kwargs)
         result = await self.make_llm_chain().ainvoke(chain_input)
-        return self._process_output(result)
+        processed = self._process_output(result)
+        self._write_llm_trace("ainvoke", chain_input, processed)
+        return processed
 
     async def _process_one(
         self, input_data: dict, semaphore: asyncio.Semaphore
@@ -147,3 +155,26 @@ class LLMBase(ABC):
     def __call__(self, **kwargs: Dict[str, Any]) -> Union[str, Any]:
         """Alias for invoke"""
         return self.invoke(**kwargs)
+
+    def _write_llm_trace(self, call_type: str, llm_input: Any, llm_output: Any) -> None:
+        """Optional low-level LLM trace logger for preprocessing pipeline."""
+        trace_dir = os.getenv("PREPROCESS_LLM_TRACE_DIR", "").strip()
+        if not trace_dir:
+            return
+        try:
+            out_dir = Path(trace_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = out_dir / "llm_calls.jsonl"
+            row = {
+                "ts_utc": datetime.now(timezone.utc).isoformat(),
+                "call_type": call_type,
+                "class": self.__class__.__name__,
+                "llm_class": self.llm.__class__.__name__,
+                "input": llm_input,
+                "output": llm_output,
+            }
+            with trace_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except Exception:
+            # Never break pipeline due to debug trace I/O errors.
+            return

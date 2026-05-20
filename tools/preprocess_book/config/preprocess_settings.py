@@ -86,13 +86,11 @@ SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# Pre-NER helper settings
-ENABLE_PRE_NER_HELPER = _env_bool("ENABLE_PRE_NER_HELPER", False)
+# Pre-NER helper settings (hard-disabled; cannot be overridden via env)
+ENABLE_PRE_NER_HELPER = False
 # Master switch: disables any pre-NER stage (Natasha + regex helper + coverage retry inputs).
-PRE_NER_ENABLED = _env_bool("PRE_NER_ENABLED", False)
-PRE_NER_MAX_ENTITIES_PER_BATCH = int(
-    os.getenv("PRE_NER_MAX_ENTITIES_PER_BATCH", "120")
-)
-PRE_NER_COVERAGE_RETRY = _env_bool("PRE_NER_COVERAGE_RETRY", True)
-PRE_NER_USE_NATASHA = _env_bool("PRE_NER_USE_NATASHA", False)
+PRE_NER_ENABLED = False
+PRE_NER_MAX_ENTITIES_PER_BATCH = 120
+PRE_NER_COVERAGE_RETRY = False
+PRE_NER_USE_NATASHA = False
 

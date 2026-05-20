@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Dict, List, Set, Tuple
+from typing import Callable, Dict, List, Set, Tuple
 
 from tools.preprocess_book.make_graph.v2_candidate_selector import jaccard, normalize_text, tokenize
 from tools.preprocess_book.make_graph.v2_models import EntityCluster, NodeEvent, RepairCandidate
@@ -15,12 +15,16 @@ class MergeResult:
 
 
 class ClusterManager:
-    def __init__(self):
+    def __init__(
+        self,
+        alias_append_logger: Callable[[dict], None] | None = None,
+    ):
         self.clusters: Dict[str, EntityCluster] = {}
         self.name_to_cluster: Dict[str, str] = {}
         # Ambiguous aliases map to multiple candidate clusters (homonyms/roles).
         self.ambiguous_name_to_clusters: Dict[str, Set[str]] = {}
         self._counter = 0
+        self._alias_append_logger = alias_append_logger
 
     def _next_cluster_id(self) -> str:
         self._counter += 1
@@ -104,6 +108,66 @@ class ClusterManager:
             self._register_name(name, cluster_id)
         return cluster_id
 
+    def _log_alias_append(
+        self,
+        *,
+        cluster_id: str,
+        alias_added: str,
+        reason: str,
+        before_count: int,
+        after_count: int,
+        source_id: tuple[int, ...] | None = None,
+        event_idx: int | None = None,
+        donor_cluster_id: str | None = None,
+    ) -> None:
+        if not self._alias_append_logger:
+            return
+        row = {
+            "cluster_id": cluster_id,
+            "source_id": list(source_id) if isinstance(source_id, tuple) else None,
+            "event_idx": event_idx,
+            "alias_added": alias_added,
+            "reason": reason,
+            "before_count": before_count,
+            "after_count": after_count,
+        }
+        if donor_cluster_id:
+            row["donor_cluster_id"] = donor_cluster_id
+        self._alias_append_logger(row)
+
+    def _append_alias_if_new(
+        self,
+        *,
+        cluster: EntityCluster,
+        alias: str,
+        reason: str,
+        source_id: tuple[int, ...] | None = None,
+        event_idx: int | None = None,
+        donor_cluster_id: str | None = None,
+    ) -> bool:
+        alias = (alias or "").strip()
+        if not alias:
+            return False
+        if alias == cluster.canonical_name:
+            return False
+        if alias in cluster.alt_names:
+            return False
+
+        before_count = len(cluster.alt_names)
+        cluster.alt_names.append(alias)
+        after_count = len(cluster.alt_names)
+        self._log_alias_append(
+            cluster_id=cluster.cluster_id,
+            alias_added=alias,
+            reason=reason,
+            before_count=before_count,
+            after_count=after_count,
+            source_id=source_id,
+            event_idx=event_idx,
+            donor_cluster_id=donor_cluster_id,
+        )
+        return True
+
     def attach_event(self, cluster_id: str, event: NodeEvent) -> None:
         root_id = self.resolve_cluster_id(cluster_id)
         cluster = self.clusters[root_id]
@@ -114,13 +178,23 @@ class ClusterManager:
         cluster.event_ids.append(f"{event.chapter_id}:{event.event_idx}")
 
         for name in event.alt_names:
-            if name and name != cluster.canonical_name and name not in cluster.alt_names:
-                cluster.alt_names.append(name)
+            self._append_alias_if_new(
+                cluster=cluster,
+                alias=name,
+                reason="attach_event.alt_name",
+                source_id=event.source_id,
+                event_idx=event.event_idx,
+            )
         for marker in event.kinship_aliases:
             if marker and marker not in cluster.kinship_aliases:
                 cluster.kinship_aliases.append(marker)
-        if event.main_name != cluster.canonical_name and event.main_name not in cluster.alt_names:
-            cluster.alt_names.append(event.main_name)
+        self._append_alias_if_new(
+            cluster=cluster,
+            alias=event.main_name,
+            reason="attach_event.main_name",
+            source_id=event.source_id,
+            event_idx=event.event_idx,
+        )
 
         for name in event.all_names:
             self._register_name(name, root_id)
@@ -136,8 +210,12 @@ class ClusterManager:
             return t
 
         for name in [donor.canonical_name] + donor.alt_names:
-            if name and name != target.canonical_name and name not in target.alt_names:
-                target.alt_names.append(name)
+            self._append_alias_if_new(
+                cluster=target,
+                alias=name,
+                reason="merge_clusters.donor_alias_union",
+                donor_cluster_id=d,
+            )
             self._register_name(name, t)
         for marker in donor.kinship_aliases:
             if marker and marker not in target.kinship_aliases:
