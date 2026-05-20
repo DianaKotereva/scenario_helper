@@ -1,0 +1,57 @@
+﻿version: 1
+name: extraction_prompt_regression_checks
+
+description: |
+  Набор регрессионных проверок для подбора extraction-промптов.
+  Все проверки применяются к файлам в results/_batch_payloads.
+
+checks:
+  - id: C001
+    type: forbid_alt_on_main
+    batch: batch_018_90_94
+    main_name: "Гэлвэ"
+    forbidden_alt: "Аэнарион"
+    note: "Гэлвэ НЕ должен идти с alt_name Аэнарион"
+
+  - id: C002
+    type: require_main_name
+    batch: batch_007_35_39
+    required_main_name: "Силанна"
+    note: "ДОЛЖНА появиться Силанна"
+
+  - id: C003
+    type: require_main_name
+    batch: batch_020_100_104
+    required_main_name: "Циандрос"
+    note: "ДОЛЖЕН появиться Циандрос"
+
+  - id: C004
+    type: forbid_laurefinde_lizard_like_node
+    batch: batch_011_55_59
+    note: "НЕ должна быть нода Лаурэфиндэ (ящер) или подобная"
+
+  - id: C005
+    type: forbid_alt_on_main_exact
+    batch: batch_026_130_134
+    main_name: "Лаурэфиндэ"
+    forbidden_alt: "Минратос"
+    note: "Лаурэфиндэ НЕ должна иметь alt_name Минратос"
+
+  - id: C006
+    type: conditional_forbid_alt_on_main_exact
+    batch: batch_006_30_34
+    main_name: "Нарион"
+    forbidden_alt: "дядя Лаурэ"
+    note: "Если есть Нарион, у него НЕ должно быть alt_name дядя Лаурэ"
+
+  - id: C007
+    type: bidirectional_no_alias_link
+    batch: batch_020_100_104
+    pivot_main_name: "Моркарк"
+    unrelated_names:
+      - "Тху"
+      - "Синденармо"
+      - "Отомбак"
+    note: |
+      Моркарк должен быть отдельной нодой: не иметь Тху/Синденармо/Отомбак
+      в alt_names и не встречаться как alt_name у этих нод.

@@ -19,3 +19,5 @@ data/bookgraph_*.pkl
 data/bookgraph_full_*.pkl
 data/bookgraph_probe*.pkl
 
+
+processed_data/
