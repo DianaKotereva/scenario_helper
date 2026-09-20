@@ -1,0 +1,60 @@
+llm:
+  base_url: https://api.deepseek.com
+  model: deepseek-chat
+  max_tokens: 8000
+  temperature: 0.2
+execution:
+  max_iterations: 50
+  max_clarifications: 3
+prompts:
+  system_prompt_file: src/sgr_agent_core/prompts/system_prompt.txt
+tools:
+  get_all_nodes_tool:
+    base_class: sgr_agent_core.tools.get_all_nodes_tool.GetAllNodesTool
+  find_related_nodes_tool:
+    base_class: sgr_agent_core.tools.find_related_nodes_tool.FindRelatedNodesTool
+  get_entity_relations_tool:
+    base_class: sgr_agent_core.tools.get_entity_relations_tool.GetEntityRelationsTool
+  get_pair_relations_tool:
+    base_class: sgr_agent_core.tools.get_pair_relations_tool.GetPairRelationsTool
+  resolve_entity_name_tool:
+    base_class: sgr_agent_core.tools.resolve_entity_name_tool.ResolveEntityNameTool
+  get_chapters_by_ids_tool:
+    base_class: sgr_agent_core.tools.get_chapters_by_ids_tool.GetChaptersByIdsTool
+  semantic_graph_search_tool:
+    base_class: sgr_agent_core.tools.semantic_graph_search_tool.SemanticGraphSearchTool
+  final_answer_tool:
+    base_class: sgr_agent_core.tools.final_answer_tool.FinalAnswerTool
+agents:
+  dialog_agent:
+    base_class: sgr_agent_core.agents.dialog_agent.DialogAgent
+    tools:
+    - resolve_entity_name_tool
+    - find_related_nodes_tool
+    - get_entity_relations_tool
+    - get_pair_relations_tool
+    - get_chapters_by_ids_tool
+    - semantic_graph_search_tool
+    - final_answer_tool
+  sgr_agent:
+    base_class: sgr_agent_core.agents.sgr_agent.SGRAgent
+    tools:
+    - get_all_nodes_tool
+    - resolve_entity_name_tool
+    - find_related_nodes_tool
+    - get_entity_relations_tool
+    - get_pair_relations_tool
+    - get_chapters_by_ids_tool
+    - semantic_graph_search_tool
+    - final_answer_tool
+  sgr_tool_calling_agent:
+    base_class: sgr_agent_core.agents.sgr_tool_calling_agent.SGRToolCallingAgent
+    tools:
+    - get_all_nodes_tool
+    - resolve_entity_name_tool
+    - find_related_nodes_tool
+    - get_entity_relations_tool
+    - get_pair_relations_tool
+    - get_chapters_by_ids_tool
+    - semantic_graph_search_tool
+    - final_answer_tool

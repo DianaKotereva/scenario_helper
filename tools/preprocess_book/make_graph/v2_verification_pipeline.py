@@ -154,7 +154,12 @@ class VerificationPipelineV2:
         self.verification_snippets_top_k = max(1, int(verification_snippets_top_k))
 
         self.selector = CandidateSelector(top_k=top_k)
-        self.cluster_manager = ClusterManager()
+        self.alias_append_log_path = self.logs_path.with_name(
+            f"{self.logs_path.stem}.alias_append_log.jsonl"
+        )
+        self.cluster_manager = ClusterManager(
+            alias_append_logger=lambda row: append_jsonl(self.alias_append_log_path, row)
+        )
         self.judge = LLMJudge(
             llm_type=llm_type,
             enabled=llm_enabled,

@@ -7,6 +7,7 @@
 """
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
@@ -45,6 +46,7 @@ from tools.preprocess_book.make_summaries import (
 )
 from tools.preprocess_book.make_graph.v2_quality_gates import evaluate_merge_quality
 from tools.preprocess_book.make_graph.v2_verification_pipeline import VerificationPipelineV2
+from tools.preprocess_book.build_relations_pair_summaries import build_relations_pair_summaries
 from tools.preprocess_book.prompts.extract_names import ExtractNames
 from tools.preprocess_book.prompts.extract_missing_nodes import ExtractMissingNodes
 from tools.preprocess_book.prompts.extract_relations import ExtractRelations
@@ -263,6 +265,12 @@ def main():
         action="store_true",
         help="Запустить валидацию snapshot и сохранить validation_report.json",
     )
+    parser.add_argument(
+        "--skip-relations-pair-summaries",
+        action="store_true",
+        help="Skip building relations_pair_summaries.jsonl after snapshot export.",
+    )
+
 
     parser.add_argument(
         "--concurrency",
@@ -281,12 +289,6 @@ def main():
         type=int,
         default=5,
         help="Top-k candidates for v2like merge.",
-    )
-    parser.add_argument(
-        "--v2-judge-concurrency",
-        type=int,
-        default=None,
-        help="Async LLM judge concurrency for v2like merge (по умолчанию = --concurrency).",
     )
     parser.add_argument(
         "--v2-disable-llm-judge",
@@ -354,11 +356,7 @@ def main():
         logger.info("Chapter limit enabled: %s", chapter_limit)
 
     run_concurrency = max(1, int(args.concurrency or 1))
-    judge_concurrency = (
-        max(1, int(args.v2_judge_concurrency))
-        if args.v2_judge_concurrency is not None
-        else run_concurrency
-    )
+    judge_concurrency = run_concurrency
     verification_last_n = (
         int(args.v2_verification_last_n)
         if args.v2_verification_last_n is not None
@@ -376,7 +374,8 @@ def main():
         extractor = ExtractNames(llm=llm)
         extractor_missing_nodes = ExtractMissingNodes(llm=llm)
         extractor_relations = ExtractRelations(llm=llm)
-        verificator = Verification(llm=llm, parser=json_parser, snippets_top_k=max(1, int(args.v2_verification_snippets_top_k)))
+        snippets_top_k = max(1, int(getattr(args, "v2_verification_snippets_top_k", 3) or 3))
+        verificator = Verification(llm=llm, parser=json_parser, snippets_top_k=snippets_top_k)
 
         # Инициализация сервисов
         logger.info("Инициализация сервисов...")
@@ -427,7 +426,7 @@ def main():
                 summarization_prompt = SummarizationPrompt(llm=llm)
                 summarization_service = SummarizationService(summarization_prompt)
                 summaries = summarization_service.create_summaries(
-                    texts, summaries_output_dir, concurrency=PARALLEL_CONCURRENCY
+                    texts, summaries_output_dir, concurrency=run_concurrency
                 )
 
                 logger.info(f"Создано {len([s for s in summaries if s])} суммаризаций")
@@ -464,7 +463,7 @@ def main():
             enable_bridge_merge=not args.v2_disable_bridge_merge,
             judge_concurrency=judge_concurrency,
             verification_last_n=verification_last_n,
-            verification_snippets_top_k=max(1, int(args.v2_verification_snippets_top_k)),
+            verification_snippets_top_k=snippets_top_k,
         )
         book_graph = pipeline.run()
         logger.info(
@@ -701,6 +700,43 @@ def main():
                         validation.get("status"),
                         validation_path,
                     )
+
+                logger.info(
+                    "Этап 5.1: Генерация profile_summary для merged entities (llm_type=%s, concurrency=%s)...",
+                    args.llm_type or "default",
+                    run_concurrency,
+                )
+                from tools.preprocess_book.snapshot.profile_summarizer import (
+                    generate_entity_profiles,
+                )
+
+                profile_stats = asyncio.run(
+                    generate_entity_profiles(
+                        snapshot_dir=snapshot_output_dir,
+                        llm_type=args.llm_type or "deepseek",
+                        model=None,
+                        concurrency=run_concurrency,
+                    )
+                )
+                logger.info("Entity profile summaries built: %s", profile_stats)
+
+                if not args.skip_relations_pair_summaries:
+                    logger.info(
+                        "Этап 5.2: Построение relations_pair_summaries.jsonl (llm_type=%s, concurrency=%s)...",
+                        args.llm_type or "default",
+                        run_concurrency,
+                    )
+                    pair_stats = build_relations_pair_summaries(
+                        snapshot_dir=snapshot_output_dir,
+                        output_file="relations_pair_summaries.jsonl",
+                        use_llm=True,
+                        llm_type=args.llm_type or "deepseek",
+                        llm_model=None,
+                        concurrency=run_concurrency,
+                        limit_pairs=0,
+                    )
+                    logger.info("relations_pair_summaries built: %s", pair_stats)
+
             except Exception as e:
                 logger.error("Ошибка при snapshot export: %s", e, exc_info=True)
 

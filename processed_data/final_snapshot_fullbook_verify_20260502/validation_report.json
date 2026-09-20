@@ -1,0 +1,327 @@
+{
+  "status": "ok",
+  "counts": {
+    "chapters": 155,
+    "chunks": 1802,
+    "entities_total": 1901,
+    "entities_raw": 0,
+    "entities_merged": 1901,
+    "relations_total": 8418,
+    "relations_raw": 0,
+    "relations_merged": 8418,
+    "entity_chapter_index": 1901
+  },
+  "merge_checks": {
+    "merged_without_chapters": 0,
+    "merged_relation_orphans": 0,
+    "alias_collision_count": 679
+  },
+  "errors": [],
+  "warnings": [
+    {
+      "type": "alias_collisions",
+      "count": 679,
+      "sample": [
+        {
+          "alias": "малекит",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:3654706e07b2738a27a74b0db9fae950c4c76686",
+            "merged_ent:51acf0f0670e58ebc667674ad771c99ef851841c",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "аулендур",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:7eb0492dedca22af554ea97110f1551ad99d88a2",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:95570e6ceda4793660bd679bc8fd5e0201d0e707",
+            "merged_ent:a7e18b569848721e5ff5630cc943ff0e8dd10868",
+            "merged_ent:ad84a16b45df5ca5464bea728576ba3469ab175f",
+            "merged_ent:af174c31d7019477650fe2ce8379b5820ee607ae",
+            "merged_ent:b08c3a1eb98e4fba4aa2a882eedef310d6b044ed",
+            "merged_ent:dcc9616d54cdbc6eee0e5e816a62441eedcc0252"
+          ]
+        },
+        {
+          "alias": "владыка наггарота",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "князь",
+          "entity_ids": [
+            "merged_ent:06f7cae30a7c18ac6b081c77249e1b405589639c",
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:28846ad0b16f12c42b7c87a8f7243910978e6659",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:3654706e07b2738a27a74b0db9fae950c4c76686",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:6162e5455a426758f267cbbfeac66f03802952fa",
+            "merged_ent:79922272da3837434c141e1890c00965107c337e",
+            "merged_ent:d728c320c867c39b41659543df12479cb9cf058a",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "король-чародей",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:3654706e07b2738a27a74b0db9fae950c4c76686",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:ca6107be16e7dbbf5e8629f445832034fc727ce8",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "куруфинвэ",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:dcc9616d54cdbc6eee0e5e816a62441eedcc0252",
+            "merged_ent:ddf75ad304a19853ecb179d4f135075245d2e083",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "куруфинвэ феанар",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:b4d2c6c100d393f8e8ec8268a68e028c4ed44309",
+            "merged_ent:cc9ce4ed6f937e60198c34424c8febba2d1f8b4b",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "наро",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "старший",
+          "entity_ids": [
+            "merged_ent:0ea8b24d285aa485e5349caafedd8fc347824caa",
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "феанар",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "феанаро",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "чарод",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:293d3d8648b9b7833f2e75e0641371bf6d8f3ab0",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73"
+          ]
+        },
+        {
+          "alias": "чароде",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:cf31eb5698965a0015e5cc9b80c4936c30456263"
+          ]
+        },
+        {
+          "alias": "чародей",
+          "entity_ids": [
+            "merged_ent:0045024837f77e889ea23180c22dbcfb66421bd3",
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:3654706e07b2738a27a74b0db9fae950c4c76686",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1",
+            "merged_ent:ed55a05ebcbe3cad2c9c12305e652e4be4d8d362"
+          ]
+        },
+        {
+          "alias": "ата",
+          "entity_ids": [
+            "merged_ent:06f7cae30a7c18ac6b081c77249e1b405589639c",
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:459702ba9f946dbca78b2c31ac16f39700b55fe0",
+            "merged_ent:5973f89f438eb1a004d16f45fb910fd63a1f1d52",
+            "merged_ent:72961201d2de2cad91fba8db790a79b0a119df6b",
+            "merged_ent:8289d3f813945ef5b2698cd9c3aeaf0d3488cef6",
+            "merged_ent:afe90638ff2d131e48504c5d36d0a99873c45258",
+            "merged_ent:c8d154072d227105e8ee97df965b3562673c3b51",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "бывший владыка наггарота",
+          "entity_ids": [
+            "merged_ent:034500e25342ab2a99b4c9f553e7be3a8c431403",
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "бывший повелитель башни холода",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7"
+          ]
+        },
+        {
+          "alias": "бывший повелитель наггарота",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "бывший правитель наггарота",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "бывший хозяин башни холода",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "былой владыка наггарота",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73"
+          ]
+        },
+        {
+          "alias": "былой повелитель башни холода",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98"
+          ]
+        },
+        {
+          "alias": "былой повелитель наггарота",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "былой хозяин башни холода",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73"
+          ]
+        },
+        {
+          "alias": "внук",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:9d13664b605f2dee9e443c649b5ccf99907e285e",
+            "merged_ent:a8700b75d9df87b426a17df5100857244033f177"
+          ]
+        },
+        {
+          "alias": "друкай",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:2b47934ee8c03d9a94ca11f5fa96c65e55197d98",
+            "merged_ent:2d669d25b87f9561126b43d396f2de6ea35763f7",
+            "merged_ent:3654706e07b2738a27a74b0db9fae950c4c76686",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73",
+            "merged_ent:b2adb9c3b6e1eabbcf6589d762b1d0061c4590f8",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1"
+          ]
+        },
+        {
+          "alias": "золотоглазый",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:6323c19fdd3157a5dd3216060634442976bbc891",
+            "merged_ent:937cd45ebc617aa8141b26f6c9282c9ca6d2bd73"
+          ]
+        },
+        {
+          "alias": "князь первого дома нолдор",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1",
+            "merged_ent:ef36c637b0ea3ad10f5fadcccb891afb2bfbeeca"
+          ]
+        },
+        {
+          "alias": "князь феанаро",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1",
+            "merged_ent:ef36c637b0ea3ad10f5fadcccb891afb2bfbeeca"
+          ]
+        },
+        {
+          "alias": "колдун",
+          "entity_ids": [
+            "merged_ent:2680c7eafcfc9d63752716983749ca4c117d27b9",
+            "merged_ent:e48498acda89fd1863772ef7379adaff9423d2c1",
+            "merged_ent:ed55a05ebcbe3cad2c9c12305e652e4be4d8d362"
+          ]
+        }
+      ]
+    }
+  ]
+}
