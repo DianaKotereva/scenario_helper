@@ -837,7 +837,7 @@ class ExtractionService:
             return []
         splitter = RecursiveCharacterTextSplitter(
             separators=["\n\n", "\n", ". ", " "],
-            chunk_size=max(256, int(EXTRACTION_SMALL_CHUNK_SIZE or 3500)),
+            chunk_size=max(256, int(EXTRACTION_SMALL_CHUNK_SIZE or 4000)),
             chunk_overlap=max(0, int(EXTRACTION_SMALL_CHUNK_OVERLAP or 250)),
         )
         chunks = [c.strip() for c in splitter.split_text(raw_text) if str(c).strip()]
